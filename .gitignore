@@ -1,0 +1,32 @@
+# 虚拟环境
+.venv/
+venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境变量（含数据库密码、API Key，绝不提交）
+.env
+
+# 本地数据库文件（如果退回 SQLite 用）
+*.db
+hub.db
+
+# 输出目录
+out/
+
+# 原始数据（含商家数据，不提交）
+data/raw/
+
+# 模型文件
+models/
+
+# 图片（体积大，不入库）
+# data/mock/images_real/  是 AI 生成的商品原图（提示词见 docs/开发指南/05_多模态沙箱.md）
+# data/mock/images/       是 prepare_image_package.py 按 URL 名复制出来的图片包
+# 需要时用 scripts/generate_mock.py + scripts/prepare_image_package.py 重新生成
+data/mock/images/
+data/mock/images_real/
+data/mock/images.zip

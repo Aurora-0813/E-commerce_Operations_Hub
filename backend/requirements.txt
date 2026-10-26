@@ -1,0 +1,37 @@
+# ============ 核心依赖 ============
+pydantic>=2.5              # 契约层（全项目唯一真相）
+pydantic-settings          # 配置
+pandas                     # 数据处理
+pyarrow                    # parquet 列式存储
+openpyxl                   # 读写 xlsx
+numpy                      # 数值
+
+# ============ 小模型（DQE）============
+scikit-learn               # TF-IDF+LR / 孤立森林
+joblib                     # 模型序列化
+jieba                      # 中文分词
+
+# ============ LLM / Agent（M3）============
+langgraph                  # 编排（状态机 + checkpointer）
+langchain-openai           # LLM 客户端（OpenAI 兼容，可换）
+
+# ============ 存储 / 队列 ============
+sqlalchemy>=2.0            # ORM（dev 用 SQLite）
+alembic                    # 迁移
+psycopg[binary]            # PG 驱动（生产才需要，dev 可不装）
+redis                      # M7 队列
+fakeredis                  # dev 测试用内存 Redis
+
+# ============ 多模态（M2）============
+pillow                     # 图片处理
+imagehash                  # pHash
+
+# ============ 工程 ============
+tenacity                   # 重试
+structlog                  # 结构化日志
+python-dotenv              # 环境变量
+
+# ============ 测试 ============
+pytest
+pytest-asyncio
+httpx
