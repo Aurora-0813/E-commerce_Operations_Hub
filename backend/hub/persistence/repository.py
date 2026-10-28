@@ -18,11 +18,11 @@ from hub.persistence.models import AnalysisRun
 class RunRepo:
     """分析运行（analysis_run）的增查改。"""
 
-    def create(self, trace_id: str, batch_id, tenant_id: str = "default") -> None:
+    def create(self, trace_id: str, batch_id=None, tenant_id: str = "default") -> None:
         """新建一次运行（状态默认 QUEUED）。
 
         :param trace_id:  贯穿全链路的 ID（业务主键）
-        :param batch_id:  所属批次 UUID（外键，必须先建 ingest_batch）
+        :param batch_id:  所属批次 UUID（**可空**：跨批次的运行，如 M3 同时分析淘宝+京东）
         :param tenant_id: 租户
         """
         with get_session() as s:

@@ -36,7 +36,9 @@ def main() -> None:
         s.commit()
 
         print("清空后各表行数：")
-        for t in TABLES + ["record"]:
+        # record / review_feature / review_topic 靠 ON DELETE CASCADE 连带删除，
+        # 这里一并打印，用来验证级联真的生效了
+        for t in TABLES + ["record", "review_feature", "review_topic"]:
             n = s.execute(text(f"SELECT count(*) FROM {t}")).scalar()
             print(f"  {t:16} {n}")
 

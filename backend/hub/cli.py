@@ -142,9 +142,28 @@ def cmd_mm(package: str, force: bool = False, batch: str | None = None,
     print(f"\n评价：待处理 {stats.total} 条，成功 {stats.processed}，跳过 {stats.skipped}")
     print(f"图片：共 {stats.images} 张｜pHash 去重 {stats.deduped} 张｜"
           f"实际调 Vision {stats.images - stats.deduped} 次｜失败 {stats.failed} 张")
+    print(f"  元数据剥离 {stats.stripped} 张（GPS/设备信息已清除）")
     print(f"  覆写销毁 {stats.destroyed} 个文件")
     print(f"  沙箱残留 {stats.residual} 个文件（应为 0）")
     print(f"  耗时 {stats.elapsed_s}s")
+    print(f"  审计记录 trace_id = {stats.trace_id}（analysis_run，可查）")
+
+
+def cmd_topic(force: bool = False, limit: int | None = None,
+              batch_size: int = 10) -> None:
+    """跑 M3 归因链：分类 → 聚合 → 归因。"""
+    from hub.analysis.engine import run_topic_analysis
+
+    print("开始 M3 归因链（分类 → 聚合 → 归因）……")
+    stats = run_topic_analysis(force=force, limit=limit, batch_size=batch_size)
+
+    print(f"\n分类：待处理 {stats.total} 条，写入 {stats.classified} 条")
+    print(f"  批量成功 {stats.batch_ok}｜逐条救回 {stats.retry_ok}｜"
+          f"兜底 {stats.fallback}｜批次数 {stats.batches}")
+    print(f"归因：格子 {stats.cells} 个，成功 {stats.attributed}，"
+          f"跳过 {stats.skipped_cells}")
+    print(f"  证据 {stats.evidence_total} 条，丢弃编造 {stats.evidence_dropped} 条")
+    print(f"  耗时 {stats.elapsed_s}s｜trace_id = {stats.trace_id}")
 
 
 def main() -> None:
@@ -173,6 +192,12 @@ def main() -> None:
     mm.add_argument("--vision", default="mock", choices=["mock", "ollama"],
                     help="Vision 实现：mock（快）或 ollama（本地 Qwen2.5-VL）")
 
+    topic = sub.add_parser("topic", help="跑 M3 归因链（分类 + 归因）")
+    topic.add_argument("--force", action="store_true",
+                       help="全量重算（默认只处理还没分类的）")
+    topic.add_argument("--limit", type=int, default=None, help="只处理前 N 条（抽检）")
+    topic.add_argument("--batch-size", type=int, default=10, help="每批分类几条")
+
     args = parser.parse_args()
 
     if args.cmd == "skeleton":
@@ -184,6 +209,8 @@ def main() -> None:
     elif args.cmd == "mm":
         cmd_mm(args.package, force=args.force, batch=args.batch,
                limit=args.limit, vision=args.vision)
+    elif args.cmd == "topic":
+        cmd_topic(force=args.force, limit=args.limit, batch_size=args.batch_size)
     else:
         parser.print_help()
 

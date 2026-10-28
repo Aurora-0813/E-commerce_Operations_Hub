@@ -67,4 +67,67 @@ try:
 except Exception as e:
     print("✅ 假证据被拦截，错误：", e)
 
+print("\n=== 第 4 步：图片证据（quote = 缺陷类型，不在原文里）===")
+a4 = Attribution.model_validate(
+    {
+        "root_cause": "quality",
+        "confidence": 0.8,
+        "explanation": "买家秀显示破洞，文字只说质量不行",
+        "evidence": [
+            {"review_id": "r1", "quote": "破损", "signal": "image"},
+            {"review_id": "r2", "quote": "质量不行", "signal": "text"},
+        ],
+    },
+    context={
+        "content_by_id": {"r2": "质量不行，不想多说"},
+        "feature_by_id": {"r1": "破损"},
+    },
+)
+print("✅ 图片证据通过（quote='破损' 对上了 feature_by_id）")
+
+print("\n=== 第 5 步：假的图片证据（应该拦截）===")
+try:
+    Attribution.model_validate(
+        {
+            "root_cause": "quality",
+            "confidence": 0.5,
+            "explanation": "测试",
+            "evidence": [{"review_id": "r1", "quote": "污渍", "signal": "image"}],
+        },
+        context={"feature_by_id": {"r1": "破损"}},
+    )
+    print("❌ 假图片证据竟然通过了（这是 bug！）")
+except Exception as e:
+    print("✅ 假图片证据被拦截，错误：", e)
+
+print("\n=== 第 6 步：评分证据 ===")
+try:
+    a6 = Attribution.model_validate(
+        {
+            "root_cause": "quality",
+            "confidence": 0.5,
+            "explanation": "一星差评",
+            "evidence": [{"review_id": "r1", "quote": "1", "signal": "rating"}],
+        },
+        context={"rating_by_id": {"r1": 1}},
+    )
+    print("✅ 评分证据通过，root_cause =", a6.root_cause.value)
+except Exception as e:
+    print("❌ 评分证据失败了：", e)
+
+print("\n=== 第 7 步：评分证据写错数字（应该拦截）===")
+try:
+    Attribution.model_validate(
+        {
+            "root_cause": "quality",
+            "confidence": 0.5,
+            "explanation": "测试",
+            "evidence": [{"review_id": "r1", "quote": "5", "signal": "rating"}],
+        },
+        context={"rating_by_id": {"r1": 1}},
+    )
+    print("❌ 错误评分竟然通过了")
+except Exception as e:
+    print("✅ 错误评分被拦截，错误：", e)
+
 print("\n诊断结束。把上面的输出全部贴给我。")

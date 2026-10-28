@@ -33,9 +33,18 @@ class ReviewTopic(StrEnum):
 
 
 class Evidence(BaseModel):
-    """一条证据：模型说"因为原文里这句"，必须能对上原文。"""
+    """一条证据：模型说"因为这条数据"，必须能对上真实数据。
+
+    signal 决定 quote 的含义：
+        text   → quote 是评价原文的片段（必须逐字出现）
+        image  → quote 是图片标签的缺陷类型（如"破损"）
+        rating → quote 是评分数字（如"1"）
+    """
     review_id: str                              # 证据来自哪条评价
-    quote: str = Field(min_length=4, max_length=80)   # 引用的原文片段（4~80 字）
+    # 长度下限放宽到 1：图片证据的 quote 是缺陷类型（"破损"只有 2 字）。
+    # "文本摘录至少 4 字"的要求挪到校验器里，按 signal 分别判断——
+    # 字段级约束无法感知 signal，只能在这里放宽。
+    quote: str = Field(min_length=1, max_length=80)
     signal: Literal["text", "image", "rating"]  # 证据类型：文本 / 图片 / 评分
 
 
@@ -48,19 +57,41 @@ class Attribution(BaseModel):
 
     @model_validator(mode="after")
     def ground_evidence(self, info: ValidationInfo):
-        """反幻觉校验：证据的 quote 必须是原文真实子串。
+        """反幻觉校验：每条证据都要能对上"真实数据"，按 signal 分三种校验。
 
-        原理：调用方在 model_validate(...) 时，通过 context 传入
-        {"content_by_id": {review_id: 原文}}，这里逐条核对：
-            - 引用的 review_id 必须存在
-            - quote 必须是该原文的子串
-        否则抛 ValueError，模型这条输出作废（触发修复重试，见开发指南 06）。
+        为什么不能只用子串校验：
+            图片证据的 quote 是"破损"——它是图片标签，**不在评价原文里**，
+            用子串校验必然失败。原设计把三种信号都套子串校验，是个隐藏 bug。
+
+        调用方在 model_validate(...) 时通过 context 传入：
+            content_by_id: {review_id: 原文}
+            feature_by_id: {review_id: defect_type}   # 图片证据才需要
+            rating_by_id:  {review_id: int}           # 评分证据才需要
         """
-        content_by_id: dict = (info.context or {}).get("content_by_id", {})
+        ctx = info.context or {}
+        content_by_id: dict = ctx.get("content_by_id", {})
+        feature_by_id: dict = ctx.get("feature_by_id", {})
+        rating_by_id: dict = ctx.get("rating_by_id", {})
+
         for e in self.evidence:
-            raw = content_by_id.get(e.review_id)
-            if raw is None or e.quote not in raw:
-                raise ValueError(f"EVIDENCE_NOT_GROUNDED:{e.review_id}")
+            if e.signal == "text":
+                # 文本摘录至少 4 字（太短没有证据价值，如"差""烂"）
+                if len(e.quote) < 4:
+                    raise ValueError(f"TEXT_QUOTE_TOO_SHORT:{e.review_id}")
+                raw = content_by_id.get(e.review_id)
+                if raw is None or e.quote not in raw:
+                    raise ValueError(f"EVIDENCE_NOT_GROUNDED:{e.review_id}")
+
+            elif e.signal == "image":
+                defect = feature_by_id.get(e.review_id)
+                if defect is None or e.quote != defect:
+                    raise ValueError(f"IMAGE_EVIDENCE_NOT_GROUNDED:{e.review_id}")
+
+            else:  # signal == "rating"
+                rating = rating_by_id.get(e.review_id)
+                if rating is None or e.quote != str(rating):
+                    raise ValueError(f"RATING_EVIDENCE_NOT_GROUNDED:{e.review_id}")
+
         # 高置信（≥0.8）却只有 1 条证据 → 不可信，也要拒
         if self.confidence >= 0.8 and len(self.evidence) < 2:
             raise ValueError("EVIDENCE_INSUFFICIENT_FOR_HIGH_CONFIDENCE")

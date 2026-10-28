@@ -1,0 +1,120 @@
+# -*- coding: utf-8 -*-
+"""
+评测 M3 分类质量（对 gold_labels 的人工标注）
+============================================
+gold_labels.csv 的"主题分类"列扮演**人工标注**（ground truth），
+拿它和 review_topic 里的模型预测比。
+
+只评"问题类"的 6 个主题：
+    quality / size / logistics / service / desc_mismatch / misship
+（gold 里的 positive / other 不评——我们只分类差评）
+
+重要说明：
+    mock 的差评是模板生成的，文本规整、关键词明显，
+    准确率会**虚高**；真实电商评论预计显著更低。
+    这里的数字只用于验证"链路正确"，不代表模型真实能力。
+
+运行（在 backend/ 目录下）：
+    python scripts/eval_topic.py
+"""
+import csv
+import sys
+from collections import Counter
+from pathlib import Path
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+from sqlalchemy import select          # noqa: E402
+
+from hub.persistence.db import get_session   # noqa: E402
+from hub.persistence.models import Record as RecordRow   # noqa: E402
+from hub.persistence.models import ReviewTopic         # noqa: E402
+
+GOLD_PATH = _BACKEND_DIR.parent / "data" / "mock" / "gold_labels.csv"
+PROBLEM_TOPICS = ("quality", "size", "logistics", "service", "desc_mismatch", "misship")
+
+
+def load_gold() -> dict[str, str]:
+    """读人工标注：{平台评价ID: 主题}，只保留问题类。"""
+    out: dict[str, str] = {}
+    with open(GOLD_PATH, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            rid = (row.get("记录ID") or "").strip()
+            topic = (row.get("主题分类") or "").strip()
+            if rid and topic in PROBLEM_TOPICS:
+                out[rid] = topic
+    return out
+
+
+def load_pred(gold_ids: list[str]) -> dict[str, str]:
+    """从数据库取模型的预测：{平台评价ID: 主题}。"""
+    if not gold_ids:
+        return {}
+    with get_session() as s:
+        rows = s.execute(
+            select(RecordRow.platform_review_id, ReviewTopic.topic)
+            .join(ReviewTopic, ReviewTopic.record_id == RecordRow.id)
+            .where(RecordRow.platform_review_id.in_(gold_ids))
+        ).all()
+    return {r.platform_review_id: r.topic for r in rows}
+
+
+def main() -> None:
+    gold = load_gold()
+    print(f"人工标注（问题类）: {len(gold)} 条")
+
+    pred = load_pred(list(gold))
+    print(f"其中已分类的      : {len(pred)} 条")
+
+    common = sorted(set(gold) & set(pred))
+    if not common:
+        print("\n❌ 没有交集——检查 gold 的『记录ID』和 record.platform_review_id 是否对得上")
+        return
+    print(f"可评测            : {len(common)} 条\n")
+
+    # ---------- 准确率 ----------
+    correct = sum(1 for k in common if gold[k] == pred[k])
+    acc = correct / len(common)
+    print(f"=== 整体准确率：{correct}/{len(common)} = {acc:.1%} ===\n")
+
+    # ---------- 每类 P/R/F1 ----------
+    print(f"{'主题':<15} {'支持':>4} {'精确':>6} {'召回':>6} {'F1':>6}")
+    print("-" * 44)
+    for t in PROBLEM_TOPICS:
+        tp = sum(1 for k in common if gold[k] == t and pred[k] == t)
+        fp = sum(1 for k in common if gold[k] != t and pred[k] == t)
+        fn = sum(1 for k in common if gold[k] == t and pred[k] != t)
+        support = tp + fn
+        p = tp / (tp + fp) if tp + fp else 0.0
+        r = tp / (tp + fn) if tp + fn else 0.0
+        f1 = 2 * p * r / (p + r) if p + r else 0.0
+        print(f"{t:<15} {support:>4} {p:>6.2f} {r:>6.2f} {f1:>6.2f}")
+
+    # ---------- 混淆矩阵 ----------
+    print("\n=== 混淆矩阵（行=人工，列=模型）===")
+    header = "".join(f"{t[:8]:>10}" for t in PROBLEM_TOPICS)
+    print(f"{'':<15}{header}")
+    for g in PROBLEM_TOPICS:
+        cells = []
+        for p_ in PROBLEM_TOPICS:
+            n = sum(1 for k in common if gold[k] == g and pred[k] == p_)
+            cells.append(f"{n:>10}")
+        print(f"{g:<15}{''.join(cells)}")
+
+    # ---------- 错例 ----------
+    wrong = [(k, gold[k], pred[k]) for k in common if gold[k] != pred[k]]
+    print(f"\n=== 判错 {len(wrong)} 条（前 10 条）===")
+    for rid, g, p_ in wrong[:10]:
+        print(f"  {rid}  人工={g:<14} 模型={p_}")
+
+    # ---------- 诚实提示 ----------
+    print("\n" + "=" * 52)
+    print("注意：mock 差评是模板生成的，文本规整，准确率虚高。")
+    print("      真实电商评论（口语/错别字/无关键词）预计 70~80%。")
+    print("      此数字仅用于验证链路正确性。")
+
+
+if __name__ == "__main__":
+    main()

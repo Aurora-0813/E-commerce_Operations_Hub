@@ -43,8 +43,10 @@ class MultimodalStats:
     images: int = 0       # 实际处理的图片张数
     deduped: int = 0      # pHash 命中的图片数（省掉的模型调用）
     failed: int = 0       # Vision 调用失败的图片数（已降级）
+    stripped: int = 0     # 成功剥离元数据的张数（隐私红线）
     destroyed: int = 0    # 覆写销毁的文件数
     residual: int = 0     # 销毁后沙箱残留（应为 0）
+    trace_id: str = ""    # 这次运行的 trace_id（写进 analysis_run，用于审计）
     elapsed_s: float = 0.0
 
 
@@ -152,12 +154,56 @@ def run_multimodal(
     # with 退出 → 沙箱覆写销毁
     stats.destroyed = sb.destroyed
     stats.residual = sb.residual()
+    stats.stripped = sb.stripped
 
     # 批量写 review_feature
     _write_features(features)
 
     stats.elapsed_s = round(time.time() - t0, 2)
+
+    # 写运行记录（审计）：没有这一条，我们只是在"声称合规"，不是"证明合规"
+    stats.trace_id = _write_run(stats, v.name)
+
     return stats
+
+
+def _write_run(stats: "MultimodalStats", vision_model: str) -> str:
+    """写一条 analysis_run，作为 M2 的审计痕迹。
+
+    为什么 M2 也要写：
+        我们宣称"图片阅后即焚 + 元数据剥离"，但控制台输出不留存、不可审计。
+        写进 analysis_run 之后，就能查"何时、处理多少张、剥离多少、销毁多少、残留几"。
+        `residual == 0` 就是"销毁成功"的直接证据。
+
+    :return: trace_id（写入失败返回空串，不阻塞主流程）
+    """
+    from uuid import uuid4
+
+    from hub.persistence.repository import RunRepo
+
+    trace_id = uuid4().hex
+    status = "DONE" if stats.residual == 0 and stats.failed == 0 else "DEGRADED"
+    payload = {
+        "module": "M2",
+        "images": stats.images,
+        "stripped": stats.stripped,
+        "deduped": stats.deduped,
+        "vision_calls": stats.images - stats.deduped,
+        "failed": stats.failed,
+        "destroyed": stats.destroyed,
+        "residual": stats.residual,
+        "vision_model": vision_model,
+        "elapsed_s": stats.elapsed_s,
+    }
+
+    try:
+        repo = RunRepo()
+        repo.create(trace_id, batch_id=None)      # M2 也是跨批次的
+        repo.update_status(trace_id, status, stats=payload)
+        return trace_id
+    except Exception as e:                        # noqa: BLE001 审计失败不该拖垮主流程
+        print(f"  [审计] 写 analysis_run 失败：{e}")
+        return ""
 
 
 def _aggregate(image_tags: list[tuple[VisionTags, str, str]]):

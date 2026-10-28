@@ -6,8 +6,8 @@
 本文件是数据库的"唯一真相"：用 SQLAlchemy 2.0 声明式写法定义所有表。
 建表不靠手动写 SQL，而是用 Alembic 从这些模型自动生成迁移（alembic revision --autogenerate）。
 
-表按业务域分组（共 34 张）：
-    一、数据接入与质量    ingest_batch / record / review_feature / sku_mapping / price_snapshot
+表按业务域分组（共 35 张）：
+    一、数据接入与质量    ingest_batch / record / review_feature / review_topic / sku_mapping / price_snapshot
     二、运行与分析        analysis_run / issue_cluster / anomaly
     三、执行              action_proposal / tool_execution / idempotency_record / hitl_task / dead_letter
     四、可观测与评估      trace_span / judge_score / model_registry / eval_case / eval_result
@@ -142,6 +142,42 @@ class ReviewFeature(Base):
                                                  server_default=text("now()"))
 
 
+class ReviewTopic(Base):
+    """评价的文本主题（M3 归因链产出）。
+
+    和 review_feature 是**姊妹表**：
+        review_feature  —— M2 产出（图片特征，只有"有图"的评价才有）
+        review_topic    —— M3 产出（文本分类，所有差评都有）
+
+    为什么独立成表，而不是给 record 加列：
+        1. **生产者不同**（M2 / M3）→ 可以独立失败、独立重跑；
+        2. **基数不同**（89 条 vs 366 条）→ 合并会产生大量 NULL；
+        3. **生命周期不同**（图片跑一次稳定，改提示词就要全量重算）。
+    """
+    __tablename__ = "review_topic"
+
+    record_id: Mapped[UUID] = mapped_column(ForeignKey("record.id", ondelete="CASCADE"),
+                                            primary_key=True)
+    topic: Mapped[str] = mapped_column(Text, nullable=False)         # 问题主题（封闭枚举）
+    severity: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)   # 1~5（注意：review_feature 是 0~3）
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    impl: Mapped[str] = mapped_column(Text, nullable=False)          # llm.v1 / rule_fallback
+    model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+
+    __table_args__ = (
+        # 主题用 DB 层约束锁死，防止代码里写错枚举值
+        CheckConstraint(
+            "topic IN ('quality','size','logistics','service','desc_mismatch','misship','other')",
+            name="ck_review_topic_topic",
+        ),
+        CheckConstraint("severity IS NULL OR (severity BETWEEN 1 AND 5)",
+                        name="ck_review_topic_severity"),
+    )
+
+
 class SkuMapping(Base):
     """跨平台 SPU 主数据对齐（同款识别）。"""
     __tablename__ = "sku_mapping"
@@ -185,7 +221,9 @@ class AnalysisRun(Base):
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
                                      server_default=text("gen_random_uuid()"))
     trace_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    batch_id: Mapped[UUID] = mapped_column(ForeignKey("ingest_batch.id"), nullable=False)
+    # 可空：一次运行可能跨多个批次（比如 M3 归因链同时分析淘宝 + 京东的差评，
+    # 填任何单一 batch_id 都不准确）
+    batch_id: Mapped[UUID | None] = mapped_column(ForeignKey("ingest_batch.id"), nullable=True)
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'QUEUED'"))
     degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

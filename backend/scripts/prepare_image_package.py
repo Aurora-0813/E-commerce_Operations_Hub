@@ -17,6 +17,7 @@
 """
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -57,11 +58,31 @@ def main() -> None:
         return
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 先清掉上一次留下的旧图片。
+    # 不清的话，包里会出现"没人引用的陈旧文件"，导致
+    # 沙箱导入数 > 实际处理数（看起来像 bug）。
+    stale = 0
+    for p in OUT_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+            p.unlink()
+            stale += 1
+    if stale:
+        print(f"清理旧图片 {stale} 张")
+
     for i, name in enumerate(names):
         shutil.copy2(real_images[i % len(real_images)], OUT_DIR / name)
 
+    # 同步重建 zip：目录和 zip 必须一致，
+    # 否则用 images.zip 跑 M2 会又导入那些陈旧文件。
+    zip_path = OUT_DIR.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in names:
+            zf.write(OUT_DIR / name, arcname=name)
+
     print(f"✅ 图片包已准备：{len(names)} 个文件（循环使用 {len(real_images)} 张真实图）")
     print(f"   输出目录：{OUT_DIR}")
+    print(f"   同步 zip：{zip_path}（{len(names)} 个文件）")
 
 
 if __name__ == "__main__":
