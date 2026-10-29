@@ -328,8 +328,14 @@ class ActionProposal(Base):
     tool_version: Mapped[str] = mapped_column(Text, nullable=False)
     args: Mapped[dict] = mapped_column(JSONB, nullable=False)
     risk_level: Mapped[str] = mapped_column(Text, nullable=False)
+    # 依据引用：哪个簇 / 哪个异常 / 哪几条评价。**只放依据，不放别的。**
     evidence_refs: Mapped[list] = mapped_column(JSONB, nullable=False,
                                                 server_default=text("'[]'::jsonb"))
+    # 为什么这么建议（LLM 写的一句人话）。
+    # 为什么不放 args：args 是"工具要的参数"，会被 params_model 强校验（extra=forbid）；
+    # 为什么不放 evidence_refs：那个字段的语义是"依据是谁"，塞理由进去就是名不副实。
+    # 为什么要存：这句话是模型生成的，事后重算不出来（M10 要展示给运营看）。
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'PROPOSED'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,

@@ -16,6 +16,7 @@
     ⑩ 问题簇聚类（M4，约 35 秒）
     ⑪ 价格背离检测（M4）
     ⑫ 优先级打分（M4）
+    ⑬ 生成提案 + 过网关（M5；L1 自动执行、L2/L3 转人工待办）
 
 为什么需要这个脚本：
     之前一直是**分段验证**（导入、DQE、M2、M3 分开跑），
@@ -45,6 +46,7 @@ from hub.cli import (                                    # noqa: E402
     cmd_p0,
     cmd_price,
     cmd_priority,
+    cmd_propose,
     cmd_topic,
 )
 from scripts import (                                    # noqa: E402
@@ -78,14 +80,18 @@ def summary() -> None:
 
     from hub.persistence.db import get_session
     from hub.persistence.models import (
+        ActionProposal,
         AnalysisRun,
         Anomaly,
+        HitlTask,
         IngestBatch,
         IssueCluster,
         Record as RecordRow,
         ReviewFeature,
+        ReviewReplyDraft,
         ReviewTopic,
         SkuMapping,
+        ToolExecution,
     )
 
     with get_session() as s:
@@ -102,6 +108,11 @@ def summary() -> None:
             ("anomaly(price)",
              s.scalar(select(func.count()).select_from(Anomaly)
                       .where(Anomaly.type == "price"))),
+            ("action_proposal", s.scalar(select(func.count()).select_from(ActionProposal))),
+            ("tool_execution", s.scalar(select(func.count()).select_from(ToolExecution))),
+            ("hitl_task(待批)", s.scalar(select(func.count()).select_from(HitlTask)
+                                        .where(HitlTask.status == "PENDING"))),
+            ("reply_draft", s.scalar(select(func.count()).select_from(ReviewReplyDraft))),
             ("analysis_run", s.scalar(select(func.count()).select_from(AnalysisRun))),
         ]
     print("\n最终数据快照：")
@@ -173,6 +184,11 @@ def main() -> None:
     n += 1
     step(n, "M4 优先级打分（P0~P3）")
     cmd_priority()
+
+    # ---- M5：从 P0/P1 簇生成提案，过网关（L0/L1 自动执行，L2/L3 转待办）----
+    n += 1
+    step(n, "M5 生成提案 + 过网关（L1 自动执行 / L2L3 转人工）")
+    cmd_propose()
 
     summary()
 

@@ -226,6 +226,95 @@ def cmd_priority() -> None:
     print(f"  耗时 {stats.elapsed_s}s")
 
 
+def cmd_propose(max_proposals: int = 6, execute: bool = True) -> None:
+    """M5：从 P0/P1 问题簇生成提案，并过一遍网关。"""
+    from uuid import UUID
+
+    from hub.action.proposer import propose
+    from hub.gateway import Decision, ToolCall, invoke
+    from hub.persistence.db import get_session
+    from hub.persistence.models import ActionProposal
+    from hub.tools.spec import CallContext
+
+    print("开始生成提案（代码选工具 + LLM 写正文和理由）……")
+    stats = propose(max_proposals=max_proposals)
+
+    print(f"\n生成 {stats.proposals} 个提案（P0/P1 簇 {stats.clusters} 个）")
+    for s in stats.skipped:
+        print(f"  跳过：{s}")
+    if not execute or not stats.ids:
+        return
+
+    print("\n=== 过网关 ===")
+    # 用 manager 角色：L0/L1 会直接执行（设计如此），L2/L3 依然要人批
+    ctx = CallContext(role="manager", trace_id="propose-cli")
+    tally = {}
+    for pid in stats.ids:
+        with get_session() as s:
+            p = s.get(ActionProposal, UUID(pid))
+            if p is None:
+                continue
+            call = ToolCall(
+                tool_name=p.tool_name,
+                args=p.args,
+                evidence_refs={k: v for ref in (p.evidence_refs or []) for k, v in ref.items()},
+                proposal_id=pid,
+            )
+            label = (p.rationale or "")[:30]
+        r = invoke(call, ctx)
+        tally[r.decision.value] = tally.get(r.decision.value, 0) + 1
+        task = (r.detail or {}).get("hitl_task_id")
+        extra = f"｜待办 {task[:8]}" if task else ""
+        if r.deny_code:
+            extra = f"｜{r.deny_code}"
+        print(f"  {r.brief()}{extra}  ← {label}")
+
+    print("\n汇总：" + "｜".join(f"{k} {v} 个" for k, v in sorted(tally.items())))
+    print("说明：L0/L1 已自动执行并回查；L2/L3 只建了待办，**没有动任何数据**。")
+
+
+def cmd_pending() -> None:
+    """M5：看待审批的待办。"""
+    from hub.action.approval import list_pending
+
+    rows = list_pending()
+    if not rows:
+        print("没有待审批的提案")
+        return
+    print(f"待审批 {len(rows)} 条：\n")
+    for r in rows:
+        print(f"  [{r['risk']}] {r['tool']}")
+        print(f"      理由：{r['rationale']}")
+        print(f"      参数：{r['args_preview']}")
+        print(f"      待办：{r['task_id']}（{r['expires_at']} 过期）")
+        print()
+
+
+def cmd_approve(task_id: str, by: str, note: str | None = None) -> None:
+    """M5：批准并执行。"""
+    from hub.action.approval import approve
+
+    print(f"批准待办 {task_id}（{by}）……")
+    res = approve(task_id, by, note)
+    if res.get("ok"):
+        print(f"✅ 已执行｜回查 {'通过' if res.get('verify_ok') else '未通过'}")
+        if res.get("detail", {}).get("compensate"):
+            print(f"  补偿：{res['detail']['compensate']}")
+    else:
+        print(f"❌ {res.get('reason') or res.get('deny_code')}")
+
+
+def cmd_reject(task_id: str, by: str, note: str | None = None) -> None:
+    """M5：拒绝（不执行）。"""
+    from hub.action.approval import reject
+
+    res = reject(task_id, by, note)
+    if res.get("ok"):
+        print(f"✅ 已拒绝（但什么都没做——拒绝就是不做）")
+    else:
+        print(f"❌ {res.get('reason')}")
+
+
 def main() -> None:
     """CLI 主入口。"""
     parser = argparse.ArgumentParser(prog="hub", description="跨平台电商 AI 运营决策中枢 CLI")
@@ -268,6 +357,23 @@ def main() -> None:
 
     sub.add_parser("priority", help="跑 M4 优先级打分（需先 hub cluster）")
 
+    propose_p = sub.add_parser("propose", help="M5：从 P0/P1 簇生成提案并过网关")
+    propose_p.add_argument("--max", type=int, default=6, help="最多生成几个提案")
+    propose_p.add_argument("--dry-run", action="store_true", help="只生成，不过网关")
+
+    sub.add_parser("pending", help="M5：看待审批的待办")
+
+    ap = sub.add_parser("approve", help="M5：批准一条待办并执行")
+    ap.add_argument("task_id", help="待办 ID（hub pending 能看到）")
+    ap.add_argument("--by", required=True, choices=["operator", "manager"],
+                    help="批准人角色（L2 要 operator，L3 要 manager）")
+    ap.add_argument("--note", default=None, help="审批备注")
+
+    rj = sub.add_parser("reject", help="M5：拒绝一条待办（不执行）")
+    rj.add_argument("task_id", help="待办 ID")
+    rj.add_argument("--by", required=True, choices=["operator", "manager"])
+    rj.add_argument("--note", default=None, help="拒绝理由")
+
     args = parser.parse_args()
 
     if args.cmd == "skeleton":
@@ -289,6 +395,14 @@ def main() -> None:
         cmd_price()
     elif args.cmd == "priority":
         cmd_priority()
+    elif args.cmd == "propose":
+        cmd_propose(max_proposals=args.max, execute=not args.dry_run)
+    elif args.cmd == "pending":
+        cmd_pending()
+    elif args.cmd == "approve":
+        cmd_approve(args.task_id, args.by, args.note)
+    elif args.cmd == "reject":
+        cmd_reject(args.task_id, args.by, args.note)
     else:
         parser.print_help()
 
