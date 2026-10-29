@@ -48,6 +48,7 @@ class TopicStats:
     cells: int = 0            # 格子总数
     attributed: int = 0       # 成功归因的格子数
     skipped_cells: int = 0    # 跳过（样本不足）的格子数
+    failed_cells: int = 0     # 归因失败（模型输出不可用）的格子数
     evidence_total: int = 0   # 归因证据总条数
     evidence_dropped: int = 0 # 被预过滤丢掉的编造证据数
 
@@ -65,6 +66,7 @@ class TopicStats:
             "cells": self.cells,
             "attributed": self.attributed,
             "skipped_cells": self.skipped_cells,
+            "failed_cells": self.failed_cells,
             "evidence_total": self.evidence_total,
             "evidence_dropped": self.evidence_dropped,
             "trace_id": self.trace_id,
@@ -154,7 +156,9 @@ def run_topic_analysis(
         result = attribute_cell(llm, topic, platform, payload,
                                 model_version=llm.name)
         if result is None:
-            stats.skipped_cells += 1
+            # 失败 ≠ 跳过：跳过是"样本不够，本来就不该归因"，
+            # 失败是"该归因但模型输出不可用"，必须分开统计，否则看不出问题。
+            stats.failed_cells += 1
             detail.update(skipped=True, reason="归因失败（模型输出不可用）")
             cell_details.append(detail)
             print(f"  ❌ {topic}/{platform}（{n} 条）归因失败")

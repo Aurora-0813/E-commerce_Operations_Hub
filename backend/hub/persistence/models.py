@@ -272,6 +272,31 @@ class IssueCluster(Base):
     )
 
 
+class ClusterMember(Base):
+    """簇的成员（issue_cluster 1 ── N record）。
+
+    为什么需要：
+        `issue_cluster` 只存了 5 条代表评价 + `spu_ids`，完整成员聚完就丢了。
+        但下游都要用它：
+            · M6「回复这一簇的全部差评」需要全部 review_id
+            · M9「这个簇的差评有没有减少」需要按时间统计成员
+            · M10「展开看这个簇的所有差评」需要列表
+        所以必须落库，不能只在内存里。
+
+    `is_representative`：距质心最近的那 5 条（用于前端摘要展示）。
+    """
+    __tablename__ = "cluster_member"
+
+    cluster_id: Mapped[UUID] = mapped_column(
+        ForeignKey("issue_cluster.id", ondelete="CASCADE"), primary_key=True)
+    record_id: Mapped[UUID] = mapped_column(
+        ForeignKey("record.id", ondelete="CASCADE"), primary_key=True)
+    is_representative: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+
+
 class Anomaly(Base):
     """业务异常：价格背离 / 销量波动 / 无效订单。"""
     __tablename__ = "anomaly"
@@ -479,6 +504,9 @@ class SpuCatalog(Base):
     # 补 platform 列是为了能区分"哪一行是哪个平台的商品"。
     platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
+    # 详情页描述。M5 的 listing.update_desc 工具改这一列、回查也读这一列。
+    # 真实场景里描述是"平台 × 版本"的（草稿/审核/上线），这里只存当前生效版本。
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     category_l1: Mapped[str | None] = mapped_column(Text, nullable=True)
     category_l2: Mapped[str | None] = mapped_column(Text, nullable=True)
     price_ref: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

@@ -33,23 +33,37 @@
 ```text
 降噪      3981 → keep 2318（降噪率 41.8%，差评零误杀）
 图片      100 条带图评价 / 172 张图 / pHash 去重后调 Vision 50 次 / 沙箱残留 0
-归因      450 条差评分类（准确率 94.5% vs 人工标注）/ 12 个格子归因 / 证据 100% grounded
+归因      450 条差评分类（准确率 95.8% vs 人工标注）/ 12 个格子归因 / 证据逐字校验
 对齐      20 对跨平台同款 / 30 个 canonical / 0 个错配
-聚类      15 个问题簇（"扎人面料 61"、"洗后变形 62"…），每个跨平台
+聚类      13 个问题簇（"面料扎人 55"、"掉色易旧 62"…），每个跨平台
 价格      4 个"贵且差"异常（京东贵 54% 且差评率前 5%）
-优先级    P0 2 个 / P1 2 / P2 6 / P3 5
-全链      12 步 ~395 秒
+优先级    P0 1 个 / P1 3 / P2 5 / P3 4
+全链      12 步 ~7 分钟（M2 图片 ~3 分钟 + M3 归因 ~4 分钟）
 ```
+
+| 模型 | 用途 | 大小 |
+| --- | --- | --- |
+| `qwen2.5:7b` | 文本：分类 / 归因 / 簇名 / 决策 | 4.7GB |
+| `qwen2.5vl:3b` | 视觉：图片打标（VLM 才能读图） | 3.2GB |
 
 ---
 
 ## 快速开始
 
 ```bash
-# 0. 环境：Python 3.11 + PostgreSQL + Ollama（qwen2.5vl:3b）
+# 0. 环境：Python 3.11 + PostgreSQL + Ollama
 conda create -n e-commerce_operations_hub python=3.11
 pip install -r backend/requirements.txt
-ollama pull qwen2.5vl:3b
+
+# 模型：文本和视觉分开配（VLM 为了看图牺牲了语言能力）
+ollama pull qwen2.5:3b        # 文本：M3 分类/归因、M4 簇名、M5/M6 决策
+ollama pull qwen2.5vl:3b      # 视觉：M2 图片打标
+# 只拉 qwen2.5vl:3b 也能跑（文本会走 VLM 模式，效果略差）
+
+# .env（复制 .env.example 后填）
+#   HUB_STORAGE__URL=postgresql+psycopg://postgres:密码@localhost:5432/E_commerce_Operations
+#   HUB_LLM__MODEL=qwen2.5:3b        # 文本模型
+#   HUB_VISION__MODEL=qwen2.5vl:3b   # 视觉模型
 
 # 1. 建库 + 迁移
 cd backend

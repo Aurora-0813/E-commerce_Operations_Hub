@@ -184,9 +184,21 @@ class RealVision:
 
 
 def get_vision(model: str = "mock") -> VisionModel:
-    """按名字取 Vision 实现。"""
+    """按名字取 Vision 实现。
+
+    :param model: 实现名（mock / ollama / real）。Ollama 的实际模型名从
+                  配置 `HUB_VISION__MODEL` 读（默认 qwen2.5vl:3b）。
+                  为什么分开：文本模型改 qwen2.5:3b 时，图片模型必须还是 VLM。
+    """
     if model == "mock":
         return MockVision()
     if model in ("ollama", "qwen", "qwen2.5vl", "local"):
-        return OllamaVision()
+        from hub.core.config import Settings
+
+        s = Settings()
+        return OllamaVision(
+            base_url=s.vision.base_url or s.llm.base_url or "http://localhost:11434",
+            model=s.vision.model or "qwen2.5vl:3b",
+            timeout=s.vision.timeout_s or 180,
+        )
     return RealVision()

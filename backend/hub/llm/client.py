@@ -91,7 +91,11 @@ class OllamaText:
 def get_text_llm() -> OllamaText:
     """按 .env 配置取文本 LLM。
 
-    .env 里已有 HUB_LLM__BASE_URL / MODEL，M2 配过，这里直接复用。
+    `.env` 里配的是 `HUB_LLM__MODEL`（文本专用，建议 qwen2.5:3b 这类纯文本模型）。
+
+    **兜底为什么是 VLM**：没配时回落到 `qwen2.5vl:3b`（VLM 的文本模式），
+    这样**新克隆只需要拉一个模型**（M2 本来就要用 VLM），门槛最低。
+    代价是文本效果差一点——配了 `HUB_LLM__MODEL` 就会优先用纯文本模型。
     """
     from hub.core.config import Settings
 

@@ -48,12 +48,15 @@ def _build_prompt(topic: str, platform: str, pairs: list[tuple[str, str]]) -> st
         '1. 这些差评里**最主要的 1 到 2 个问题**是什么？'
         '（具体到"缝线""面料""掉色"这样的层次；'
         "不要罗列每一条评价的症状；**不要引用 R 编号**）\n"
-        "2. 挑 1 到 5 条最能代表问题的原文，**逐字原样引用**（每条 4 到 80 字）\n\n"
+        "2. 挑 1 到 5 条最能代表问题的原文，**逐字原样复制**（每条 4 到 80 字）\n"
+        "   ⚠️ 必须和原文一模一样：**不能改写、不能删字、不能加省略号、不能拼接两条评价**。\n"
+        "   如果原文太长，就只复制其中**连续**的一段（不要跳字）。\n\n"
         "输出 JSON：\n"
         '{"explanation": "不超过 300 字，说清具体表现", '
         '"evidence": [{"id": "R1", "quote": "逐字引用"}]}\n\n'
         "铁律：\n"
-        "- quote 必须从原文逐字复制，不能改写、不能拼接两条\n"
+        "- quote 必须从原文逐字复制，一个字都不能改；不能拼接两条\n"
+        "- 复制的是**连续的一段**，中间不能省略\n"
         "- evidence 最多 5 条\n"
         "- explanation 不超过 300 字\n"
         "- 只输出 JSON，不要解释、不要代码块\n"
@@ -61,11 +64,16 @@ def _build_prompt(topic: str, platform: str, pairs: list[tuple[str, str]]) -> st
 
 
 def _parse_object(text: str) -> dict | None:
-    """从模型输出里抠 JSON 对象（要扛住 3B 的各种不听话）。
+    """从模型输出里抠 JSON 对象（要扛住模型的各种不听话）。
 
     依次尝试：
         1. 去掉 markdown 代码块围栏后直接解析
-        2. 用正则抠出最外层 {...} 再解析
+        2. **从每个 `{` 开始，用 JSONDecoder.raw_decode 试解析**
+
+    为什么第 2 步不用 `re.search(r"\\{.*\\}")`：
+        贪婪匹配会把"JSON 后面还跟了一段话"的情况整个吞进去，导致解析失败
+        （实测 7B 会在 JSON 后面补一句"希望对您有帮助"）。
+        raw_decode 只吃"第一个完整的 JSON 值"，后面有垃圾也无所谓。
     """
     s = text.strip()
     # 1. 去掉 ```json ... ``` 围栏
@@ -79,15 +87,15 @@ def _parse_object(text: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
-    # 2. 抠最外层 {...}
-    m = re.search(r"\{.*\}", s, re.S)
-    if m:
+    # 2. 从每个 '{' 试解析，取第一个能解析成 dict 的
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", s):
         try:
-            data = json.loads(m.group(0))
-            if isinstance(data, dict):
-                return data
+            data, _end = decoder.raw_decode(s, m.start())
         except json.JSONDecodeError:
-            pass
+            continue
+        if isinstance(data, dict) and data:
+            return data
     return None
 
 
@@ -226,7 +234,10 @@ def attribute_cell(
     data = _parse_object(raw)
     if data is None:
         # 打印完整输出（截断到 400 字）方便定位：是截断了，还是 JSON 语法坏了
-        print(f"  [归因] {topic}/{platform} 输出不是 JSON，原始输出：\n{raw[:400]}")
+        # 打印长度 + 头 + 尾：尾部有垃圾（"希望对您有帮助"）是 7B 的常见毛病
+        print(f"  [归因] {topic}/{platform} 输出不是 JSON（{len(raw)} 字符）\n"
+              f"    头：{raw[:200]!r}\n"
+              f"    尾：{raw[-120:]!r}")
         return None
 
     explanation = _strip_md(str(data.get("explanation", "")))[:MAX_EXPLANATION]
@@ -248,6 +259,9 @@ def attribute_cell(
         located = _locate_quote(quote, content_by_id, id_map.get(rid))
         if located is None:
             dropped += 1
+            # 打印被丢弃的引用：用来判断模型是"改写"还是"删减/拼接"
+            # （7B 比 3B 爱改写，不打印出来就不知道往哪调提示词）
+            print(f"  [归因] {topic}/{platform} 引用未命中原文：{quote[:60]!r}")
             continue
         real_id, exact = located
         if real_id in seen_ids:            # 同一句被引用两次，去重

@@ -48,13 +48,29 @@ class StorageConf(BaseModel):
 
 
 class LLMConf(BaseModel):
-    """大模型（LLM）设置"""
+    """文本大模型设置（M3 分类/归因、M4 簇名、M5/M6 决策）"""
     base_url: str = ""        # LLM 服务的地址（OpenAI 兼容接口的域名）
     model: str = ""           # 模型名，如 "qwen-plus" / "gpt-4o-mini"
     api_key: str = ""         # 密钥（千万别写死，从 .env 读）
     temperature: float = 0.0  # 温度：0 表示输出最稳定（抽取/分类用 0）
     timeout_s: int = 60       # 单次调用超时（秒）
     max_repair_retries: int = 2   # 结构化输出失败时，最多修复重试几次
+
+
+class VisionConf(BaseModel):
+    """视觉模型设置（M2 图片打标）。
+
+    为什么要和文本模型分开：
+        文本任务用纯文本模型更强（VLM 为了视觉牺牲了语言能力），
+        图片任务必须用 VLM。**一个模型名管两类任务，必然打架**——
+        实测踩过：`.env` 里同一个 `HUB_LLM__MODEL` 写了两行，
+        后一行覆盖前一行，谁生效纯靠顺序。
+
+        base_url 留空时回落到 LLMConf.base_url（同一个 Ollama 实例）。
+    """
+    base_url: str = ""        # 留空 = 用 HUB_LLM__BASE_URL
+    model: str = "qwen2.5vl:3b"
+    timeout_s: int = 180      # 图片比文本慢，超时给长一点
 
 
 class DqeConf(BaseModel):
@@ -87,9 +103,10 @@ class Settings(BaseSettings):
         extra="ignore",                 # 遇到不认识的配置项，忽略而不是报错
     )
 
-    # 5 个配置分组，都给了默认值，所以"啥都不配也能跑起来"
+    # 6 个配置分组，都给了默认值，所以"啥都不配也能跑起来"
     app: AppConf = AppConf()
     storage: StorageConf = StorageConf()
-    llm: LLMConf = LLMConf()
+    llm: LLMConf = LLMConf()          # 文本模型
+    vision: VisionConf = VisionConf()  # 视觉模型（M2）
     dqe: DqeConf = DqeConf()
     gateway: GatewayConf = GatewayConf()

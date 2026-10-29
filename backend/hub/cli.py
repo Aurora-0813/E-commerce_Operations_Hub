@@ -162,7 +162,7 @@ def cmd_topic(force: bool = False, limit: int | None = None,
           f"兜底 {stats.fallback}｜批次数 {stats.batches}")
     print(f"  多标签（识别出 2 个问题）{stats.multi_label} 条")
     print(f"归因：格子 {stats.cells} 个，成功 {stats.attributed}，"
-          f"跳过 {stats.skipped_cells}")
+          f"样本不足跳过 {stats.skipped_cells}，失败 {stats.failed_cells}")
     print(f"  证据 {stats.evidence_total} 条，丢弃编造 {stats.evidence_dropped} 条")
     print(f"  耗时 {stats.elapsed_s}s｜trace_id = {stats.trace_id}")
 
@@ -190,7 +190,8 @@ def cmd_cluster(max_per_topic: int = 5) -> None:
 
     print(f"\n差评 {stats.total_reviews} 条｜topic {stats.topics} 个"
           f"｜子簇 {stats.clusters} 个")
-    print(f"  命名成功 {stats.named} 个｜写入 issue_cluster {stats.wrote} 行")
+    print(f"  命名成功 {stats.named} 个｜写入 issue_cluster {stats.wrote} 行"
+          f"｜cluster_member {stats.members} 行")
     if stats.sizes:
         print(f"  簇大小：{sorted(stats.sizes, reverse=True)}")
     print(f"  耗时 {stats.elapsed_s}s｜trace_id = {stats.trace_id}")

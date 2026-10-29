@@ -16,7 +16,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from hub.multimodal.vision import OllamaVision   # noqa: E402
+from hub.multimodal.vision import get_vision   # noqa: E402
 
 REAL_DIR = _BACKEND_DIR.parent / "data" / "mock" / "images_real"
 
@@ -26,7 +26,9 @@ DEFECT_KEYWORDS = ("破洞", "破损", "污渍", "色差", "开线", "起球",
 
 
 def main() -> None:
-    v = OllamaVision()
+    # 走 get_vision 而不是直接 OllamaVision()：
+    # 这样模型名从 HUB_VISION__MODEL 读，改了配置这个测试会跟着变
+    v = get_vision("ollama")
     imgs = sorted(p for p in REAL_DIR.iterdir()
                   if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
 

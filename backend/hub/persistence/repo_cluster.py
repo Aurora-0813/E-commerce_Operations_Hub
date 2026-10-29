@@ -12,7 +12,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 
 from hub.persistence.db import get_session
-from hub.persistence.models import IssueCluster
+from hub.persistence.models import ClusterMember, IssueCluster
 from hub.persistence.models import Record as RecordRow
 from hub.persistence.models import ReviewTopic, SpuCatalog
 
@@ -48,14 +48,41 @@ class ClusterRepo:
                 .order_by(RecordRow.platform, RecordRow.platform_review_id)
             ).all()
 
-    def insert_clusters(self, rows: list[dict]) -> int:
-        """批量写 issue_cluster（ORM 插入，id 由 DB 生成）。"""
+    def insert_clusters(self, rows: list[dict]) -> tuple[int, int]:
+        """批量写 issue_cluster + cluster_member。
+
+        :param rows: 每个 dict 是 IssueCluster 的字段；可带 `_members`（内部字段，
+                     该簇全部 record_id 列表），不会被写进 issue_cluster。
+        :return: (簇数, 成员数)
+        """
         if not rows:
-            return 0
+            return 0, 0
+
         with get_session() as s:
-            s.add_all([IssueCluster(**r) for r in rows])
+            objs: list[tuple[IssueCluster, list]] = []
+            for r in rows:
+                # 下划线开头的是内部字段，不是表字段
+                data = {k: v for k, v in r.items() if not k.startswith("_")}
+                obj = IssueCluster(**data)
+                s.add(obj)
+                objs.append((obj, r.get("_members") or []))
+
+            s.flush()          # 拿 DB 生成的 id（gen_random_uuid）
+
+            member_rows = []
+            for obj, record_ids in objs:
+                reps = set(obj.representative_review_ids or [])
+                for rid in record_ids:
+                    member_rows.append({
+                        "cluster_id": obj.id,
+                        "record_id": rid,
+                        "is_representative": rid in reps,
+                    })
+            if member_rows:
+                s.add_all([ClusterMember(**m) for m in member_rows])
+
             s.commit()
-        return len(rows)
+            return len(rows), len(member_rows)
 
     def count(self) -> int:
         with get_session() as s:

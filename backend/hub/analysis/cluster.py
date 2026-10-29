@@ -54,6 +54,7 @@ class ClusterStats:
     clusters: int = 0          # 子簇总数
     named: int = 0             # 成功命名的簇数
     wrote: int = 0             # 写入 issue_cluster 的行数
+    members: int = 0           # 写入 cluster_member 的行数（簇 × 成员）
     sizes: list[int] = None    # 每个子簇的大小
     trace_id: str = ""
     elapsed_s: float = 0.0
@@ -191,6 +192,9 @@ def run_clustering(
                 # 这个簇涉及的商品（优先级打分算 reach 要用）
                 "spu_ids": sorted({rows[i].platform_spu_id for i in group
                                    if rows[i].platform_spu_id}),
+                # 内部字段（下划线开头，不写 issue_cluster 表）：
+                # 该簇的全部 record_id → 写 cluster_member，供 M6 回复/M9 复盘/M10 展开用
+                "_members": [rows[i].id for i in group],
             })
             stats.sizes.append(len(group))
             print(f"  [{len(group):>3} 条] {name}（{domain}，{'/'.join(platforms)}）")
@@ -206,7 +210,7 @@ def run_clustering(
     # ---------- ④ 写库 ----------
     stats.clusters = len(cluster_rows)
     stats.sizes = [r["review_count"] for r in cluster_rows]
-    stats.wrote = repo.insert_clusters(cluster_rows)
+    stats.wrote, stats.members = repo.insert_clusters(cluster_rows)
     stats.elapsed_s = round(time.time() - t0, 2)
 
     run_repo.update_status(trace_id, "DONE", stats={
@@ -294,6 +298,8 @@ def _merge_similar(rows: list[dict], threshold: float = MERGE_THRESHOLD) -> list
         out["representative_review_ids"] = [
             rid for i in idxs for rid in rows[i]["representative_review_ids"]
         ][:REPS_PER_CLUSTER]
+        # 成员也要合并，否则 cluster_member 会漏掉被合并进来的那部分
+        out["_members"] = [m for i in idxs for m in (rows[i].get("_members") or [])]
         weighted = [(rows[i]["severity"], rows[i]["review_count"])
                     for i in idxs if rows[i]["severity"] is not None]
         if weighted:
