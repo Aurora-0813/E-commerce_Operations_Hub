@@ -43,6 +43,7 @@ class TopicStats:
     retry_ok: int = 0         # 逐条救回
     fallback: int = 0         # 关键词兜底（degraded）
     batches: int = 0          # 批量调用次数
+    multi_label: int = 0      # 识别出 2 个问题的条数（多标签）
 
     cells: int = 0            # 格子总数
     attributed: int = 0       # 成功归因的格子数
@@ -111,6 +112,7 @@ def run_topic_analysis(
         stats.retry_ok = cstats.retry_ok
         stats.fallback = cstats.fallback
         stats.batches = cstats.batches
+        stats.multi_label = cstats.multi_label
 
         # ---------- ③ 写库 ----------
         stats.classified = repo.upsert_many(results)

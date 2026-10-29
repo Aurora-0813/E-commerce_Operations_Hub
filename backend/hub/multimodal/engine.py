@@ -18,7 +18,6 @@ from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from hub.contracts import VisionTags
 from hub.multimodal.phash import phash
@@ -28,6 +27,7 @@ from hub.multimodal.vision import VisionModel, get_vision
 from hub.persistence.db import get_session
 from hub.persistence.models import Record as RecordRow
 from hub.persistence.models import ReviewFeature
+from hub.persistence.upsert import upsert_all
 
 
 @dataclass
@@ -252,21 +252,6 @@ def _write_features(features: list[dict]) -> None:
     """批量写 review_feature（有则更新）。"""
     if not features:
         return
-    stmt = pg_insert(ReviewFeature).values(features)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["review_id"],
-        set_={
-            "defect_type": stmt.excluded.defect_type,
-            "severity": stmt.excluded.severity,
-            "color_deviation": stmt.excluded.color_deviation,
-            "ocr_text": stmt.excluded.ocr_text,
-            "vision_confidence": stmt.excluded.vision_confidence,
-            "phash_bit": stmt.excluded.phash_bit,
-            "image_sha256": stmt.excluded.image_sha256,
-            "vision_model": stmt.excluded.vision_model,
-            "degraded": stmt.excluded.degraded,
-        },
-    )
     with get_session() as s:
-        s.execute(stmt)
+        upsert_all(s, ReviewFeature, features, key_cols=["review_id"])
         s.commit()

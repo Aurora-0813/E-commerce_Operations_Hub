@@ -12,11 +12,11 @@ M3 归因链的数据访问层：取待分类的差评、写分类结果、按�
     record 1 ──── 1 review_topic
 """
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from hub.persistence.db import get_session
 from hub.persistence.models import Record as RecordRow
 from hub.persistence.models import ReviewTopic
+from hub.persistence.upsert import upsert_all
 
 
 class ReviewTopicRepo:
@@ -66,27 +66,19 @@ class ReviewTopicRepo:
     def upsert_many(self, rows: list[dict]) -> int:
         """批量写入 review_topic（主键冲突则更新）。
 
-        :param rows: 每个 dict 含 record_id / topic / severity / confidence /
-                     impl / model_version / degraded
+        :param rows: 每个 dict 含 record_id / topic / secondary_topics / severity /
+                     confidence / impl / model_version / degraded
         :return: 写入了多少条
+
+        ⚠️ 踩过的坑：`set_` 里必须列出**所有可更新字段**。
+        漏了 `secondary_topics`，`--force` 重跑时（走 conflict 分支）
+        多标签就永远不会被写进去（表现为"CLI 说有 163 条多标签，库里是 0 条"）。
         """
         if not rows:
             return 0
 
-        stmt = pg_insert(ReviewTopic).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["record_id"],
-            set_={
-                "topic": stmt.excluded.topic,
-                "severity": stmt.excluded.severity,
-                "confidence": stmt.excluded.confidence,
-                "impl": stmt.excluded.impl,
-                "model_version": stmt.excluded.model_version,
-                "degraded": stmt.excluded.degraded,
-            },
-        )
         with get_session() as s:
-            s.execute(stmt)
+            upsert_all(s, ReviewTopic, rows, key_cols=["record_id"])
             s.commit()
         return len(rows)
 

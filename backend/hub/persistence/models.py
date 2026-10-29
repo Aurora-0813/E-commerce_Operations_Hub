@@ -158,11 +158,19 @@ class ReviewTopic(Base):
 
     record_id: Mapped[UUID] = mapped_column(ForeignKey("record.id", ondelete="CASCADE"),
                                             primary_key=True)
-    topic: Mapped[str] = mapped_column(Text, nullable=False)         # 问题主题（封闭枚举）
+    topic: Mapped[str] = mapped_column(Text, nullable=False)         # 主问题（封闭枚举）
+    # 次要问题（0~1 个）：真实差评常一句话说多个问题，
+    # 主标签只保留最主要的，其余放这里。统计"提到某问题多少条"时：
+    #   WHERE topic = 'size' OR 'size' = ANY(secondary_topics)
+    secondary_topics: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'"))
     severity: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)   # 1~5（注意：review_feature 是 0~3）
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     impl: Mapped[str] = mapped_column(Text, nullable=False)          # llm.v1 / rule_fallback
     model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 提示词版本 = 模板内容的 SHA256 前 8 位。
+    # 为什么要记：改提示词后要能区分"这批结果用的哪版"，否则准确率变化无法归因。
+    prompt_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  server_default=text("now()"))
@@ -252,6 +260,10 @@ class IssueCluster(Base):
     priority_tier: Mapped[str | None] = mapped_column(Text, nullable=True)
     representative_review_ids: Mapped[list[UUID]] = mapped_column(
         ARRAY(PGUUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
+    # 这个簇涉及哪些商品（平台商品 ID）。优先级打分要算"受影响销量占比"，
+    # 没有它就只能退回"评价量占比"。
+    spu_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  server_default=text("now()"))
 
@@ -462,6 +474,10 @@ class SpuCatalog(Base):
     __tablename__ = "spu_catalog"
 
     canonical_spu_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # 注意：这一列现在存的是**平台商品 ID**（TB-0001 / JD-0001），不是真正的 canonical。
+    # 同款对齐由 sku_mapping 负责；跨平台查询用 JOIN sku_mapping。
+    # 补 platform 列是为了能区分"哪一行是哪个平台的商品"。
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     category_l1: Mapped[str | None] = mapped_column(Text, nullable=True)
     category_l2: Mapped[str | None] = mapped_column(Text, nullable=True)

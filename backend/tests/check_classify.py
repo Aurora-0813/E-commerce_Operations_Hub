@@ -97,6 +97,29 @@ def main() -> None:
     ok = all(r["impl"] == IMPL_FALLBACK and r["degraded"] for r in bad_results)
     print(f"  {'✅ 全部正确降级到关键词兜底' if ok else '❌ 降级逻辑有问题'}")
 
+    # ---------- 第 5 步：截断容错（离线，不调模型）----------
+    print("\n=== 第 5 步：JSON 被截断时能不能救回已生成的对象 ===")
+    from hub.analysis.classify import _parse_array   # 局部导入，避免顶部噪音
+
+    cases = [
+        ("完整数组",
+         '[{"id":"R1","topic":"quality","severity":3,"confidence":0.9}]', 1),
+        ("markdown 围栏",
+         '```json\n[{"id":"R1","topic":"size","severity":2,"confidence":0.8}]\n```', 1),
+        ("**截断**（第 2 个对象写了一半）",
+         '[{"id":"R1","topic":"quality","severity":3,"confidence":0.9},\n'
+         '{"id":"R2"', 1),
+        ("完全不是 JSON", "我觉得这些评价都挺差的", 0),
+    ]
+    all_ok = True
+    for label, text, expect in cases:
+        parsed = _parse_array(text)
+        got = len(parsed) if parsed else 0
+        ok = got == expect
+        all_ok = all_ok and ok
+        print(f"  {'✅' if ok else '❌'} {label:<26} 恢复 {got} 个（预期 {expect}）")
+    print(f"  {'✅ 截断容错正常（截断时至少救回完整的对象）' if all_ok else '❌ 解析逻辑有问题'}")
+
 
 if __name__ == "__main__":
     main()

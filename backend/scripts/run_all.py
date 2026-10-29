@@ -12,6 +12,10 @@
     ⑥ 跑 DQE 降噪
     ⑦ 跑 M2 多模态（图片，约 3 分钟）
     ⑧ 跑 M3 归因链（分类 + 归因，约 4 分钟）
+    ⑨ 同款对齐（M11，写入 sku_mapping）
+    ⑩ 问题簇聚类（M4，约 35 秒）
+    ⑪ 价格背离检测（M4）
+    ⑫ 优先级打分（M4）
 
 为什么需要这个脚本：
     之前一直是**分段验证**（导入、DQE、M2、M3 分开跑），
@@ -33,7 +37,16 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from hub.cli import cmd_dqe, cmd_mm, cmd_p0, cmd_topic   # noqa: E402
+from hub.cli import (                                    # noqa: E402
+    cmd_align,
+    cmd_cluster,
+    cmd_dqe,
+    cmd_mm,
+    cmd_p0,
+    cmd_price,
+    cmd_priority,
+    cmd_topic,
+)
 from scripts import (                                    # noqa: E402
     backfill_image_url,
     prepare_image_package,
@@ -66,10 +79,13 @@ def summary() -> None:
     from hub.persistence.db import get_session
     from hub.persistence.models import (
         AnalysisRun,
+        Anomaly,
         IngestBatch,
+        IssueCluster,
         Record as RecordRow,
         ReviewFeature,
         ReviewTopic,
+        SkuMapping,
     )
 
     with get_session() as s:
@@ -81,6 +97,11 @@ def summary() -> None:
                       .where(RecordRow.dqe_decision == "keep"))),
             ("review_feature", s.scalar(select(func.count()).select_from(ReviewFeature))),
             ("review_topic", s.scalar(select(func.count()).select_from(ReviewTopic))),
+            ("sku_mapping", s.scalar(select(func.count()).select_from(SkuMapping))),
+            ("issue_cluster", s.scalar(select(func.count()).select_from(IssueCluster))),
+            ("anomaly(price)",
+             s.scalar(select(func.count()).select_from(Anomaly)
+                      .where(Anomaly.type == "price"))),
             ("analysis_run", s.scalar(select(func.count()).select_from(AnalysisRun))),
         ]
     print("\n最终数据快照：")
@@ -133,6 +154,25 @@ def main() -> None:
     n += 1
     step(n, "跑 M3 归因链（分类 + 归因）")
     cmd_topic(force=True)
+
+    # ---- M11 + M4：同款对齐 → 聚类 → 价格背离 → 优先级 ----
+    # 顺序不能乱：先对齐（sku_mapping），价格背离才有跨平台数据可比；
+    # 先聚类，优先级才有簇可打分。
+    n += 1
+    step(n, "M11 同款对齐（sku_mapping）")
+    cmd_align()
+
+    n += 1
+    step(n, "M4 问题簇聚类（topic → 子簇）")
+    cmd_cluster()
+
+    n += 1
+    step(n, "M4 价格背离检测（anomaly）")
+    cmd_price()
+
+    n += 1
+    step(n, "M4 优先级打分（P0~P3）")
+    cmd_priority()
 
     summary()
 

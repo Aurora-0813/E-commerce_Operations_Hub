@@ -35,6 +35,7 @@ from hub.persistence.models import (
     SalesDaily,
     SpuCatalog,
 )
+from hub.persistence.upsert import upsert_all
 
 
 class IngressRepo:
@@ -122,18 +123,11 @@ class IngressRepo:
         if not records:
             return
         rows = [self._to_spu_row(r) for r in records]
-        stmt = pg_insert(SpuCatalog).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["canonical_spu_id"],
-            set_={
-                "title": stmt.excluded.title,
-                "category_l1": stmt.excluded.category_l1,
-                "category_l2": stmt.excluded.category_l2,
-                "price_ref": stmt.excluded.price_ref,
-                "updated_at": func.now(),
-            },
-        )
-        s.execute(stmt)
+        # 用通用 upsert：set_ 自动包含除主键外的所有字段
+        # （手写容易漏，比如后来加的 platform 就差点忘）
+        # updated_at 不在 rows 里（它是服务端表达式），用 extra_set 补
+        upsert_all(s, SpuCatalog, rows, key_cols=["canonical_spu_id"],
+                   extra_set={"updated_at": func.now()})
 
     def _to_spu_row(self, r: Record) -> dict:
         """Record 契约 → spu_catalog 表的一行。"""
@@ -142,6 +136,7 @@ class IngressRepo:
         return {
             # 同款对齐还没做，先拿平台商品 ID 当 canonical_spu_id，对齐后再改
             "canonical_spu_id": r.fields.get("platform_spu_id") or "",
+            "platform": r.platform,          # 区分 TB-0001 / JD-0001（M4 对齐要用）
             "title": r.fields.get("title") or "",
             "category_l1": cat[0] if cat and cat[0] else None,
             "category_l2": cat[1] if len(cat) > 1 and cat[1] else None,
@@ -154,18 +149,8 @@ class IngressRepo:
         if not records:
             return
         rows = [self._to_sales_row(r) for r in records]
-        stmt = pg_insert(SalesDaily).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["canonical_spu_id", "platform", "stat_date"],
-            set_={
-                "gmv": stmt.excluded.gmv,
-                "units": stmt.excluded.units,
-                "uv": stmt.excluded.uv,
-                "refund_units": stmt.excluded.refund_units,
-                "refund_amount": stmt.excluded.refund_amount,
-            },
-        )
-        s.execute(stmt)
+        upsert_all(s, SalesDaily, rows,
+                   key_cols=["canonical_spu_id", "platform", "stat_date"])
 
     def _to_sales_row(self, r: Record) -> dict:
         """Record 契约 → sales_daily 表的一行。"""

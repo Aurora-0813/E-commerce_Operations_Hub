@@ -160,10 +160,69 @@ def cmd_topic(force: bool = False, limit: int | None = None,
     print(f"\n分类：待处理 {stats.total} 条，写入 {stats.classified} 条")
     print(f"  批量成功 {stats.batch_ok}｜逐条救回 {stats.retry_ok}｜"
           f"兜底 {stats.fallback}｜批次数 {stats.batches}")
+    print(f"  多标签（识别出 2 个问题）{stats.multi_label} 条")
     print(f"归因：格子 {stats.cells} 个，成功 {stats.attributed}，"
           f"跳过 {stats.skipped_cells}")
     print(f"  证据 {stats.evidence_total} 条，丢弃编造 {stats.evidence_dropped} 条")
     print(f"  耗时 {stats.elapsed_s}s｜trace_id = {stats.trace_id}")
+
+
+def cmd_align() -> None:
+    """跑跨平台同款对齐（M11）：读商品目录 → 对齐 → 写 sku_mapping。"""
+    from hub.analysis.align import run_alignment
+
+    print("开始同款对齐（TF-IDF + 余弦相似度）……")
+    result = run_alignment()
+
+    print(f"\n自动匹配 {result.matched_pairs} 对")
+    print(f"  淘宝独占 {result.tb_only} 个｜京东独占 {result.jd_only} 个")
+    print(f"  canonical 总数 {result.canonical_total} 个")
+    print(f"  人工候选 {len(result.review_pairs)} 对（置信度介于 0.60~0.85）")
+    print(f"  写入 sku_mapping {len(result.mappings)} 行")
+
+
+def cmd_cluster(max_per_topic: int = 5) -> None:
+    """跑 M4 分层聚类（按 topic 分组 → 组内 KMeans → LLM 命名）。"""
+    from hub.analysis.cluster import run_clustering
+
+    print("开始分层聚类（topic 分组 → TF-IDF + SVD + KMeans → LLM 命名）……")
+    stats = run_clustering(max_per_topic=max_per_topic)
+
+    print(f"\n差评 {stats.total_reviews} 条｜topic {stats.topics} 个"
+          f"｜子簇 {stats.clusters} 个")
+    print(f"  命名成功 {stats.named} 个｜写入 issue_cluster {stats.wrote} 行")
+    if stats.sizes:
+        print(f"  簇大小：{sorted(stats.sizes, reverse=True)}")
+    print(f"  耗时 {stats.elapsed_s}s｜trace_id = {stats.trace_id}")
+
+
+def cmd_price() -> None:
+    """跑 M4 价格背离检测（需要先跑 hub align）。"""
+    from hub.analysis.price import run_price_divergence
+
+    print("开始价格背离检测（dev + 差评率分位）……")
+    stats = run_price_divergence()
+
+    print(f"\n有跨平台价格的商品 {stats.spus} 个")
+    print(f"  检出异常 {stats.flagged} 个｜写入 anomaly {stats.wrote} 行")
+    print(f"  耗时 {stats.elapsed_s}s｜trace_id = {stats.trace_id}")
+
+
+def cmd_priority() -> None:
+    """跑 M4 优先级打分（给最近一次聚类的每个簇打分）。"""
+    from hub.analysis.priority import run_priority
+
+    print("开始优先级打分（reach + severity + trend + actionability）……")
+    stats = run_priority()
+
+    print(f"\n簇 {stats.clusters} 个｜打分 {stats.scored} 个")
+    if stats.tiers:
+        print("  分档：" + "｜".join(f"{k} {v} 个" for k, v in sorted(stats.tiers.items())))
+    if stats.top:
+        print("  Top 3：")
+        for label, score, tier, n, reach in stats.top:
+            print(f"    {tier} {score:>5.1f}  {label}（{n} 条）")
+    print(f"  耗时 {stats.elapsed_s}s")
 
 
 def main() -> None:
@@ -198,6 +257,16 @@ def main() -> None:
     topic.add_argument("--limit", type=int, default=None, help="只处理前 N 条（抽检）")
     topic.add_argument("--batch-size", type=int, default=10, help="每批分类几条")
 
+    sub.add_parser("align", help="跑跨平台同款对齐（M11，M4 的前置）")
+
+    cluster = sub.add_parser("cluster", help="跑 M4 分层聚类（topic → 子簇）")
+    cluster.add_argument("--max-per-topic", type=int, default=5,
+                         help="单个 topic 最多拆几个子簇（默认 5）")
+
+    sub.add_parser("price", help="跑 M4 价格背离检测（需先 hub align）")
+
+    sub.add_parser("priority", help="跑 M4 优先级打分（需先 hub cluster）")
+
     args = parser.parse_args()
 
     if args.cmd == "skeleton":
@@ -211,6 +280,14 @@ def main() -> None:
                limit=args.limit, vision=args.vision)
     elif args.cmd == "topic":
         cmd_topic(force=args.force, limit=args.limit, batch_size=args.batch_size)
+    elif args.cmd == "align":
+        cmd_align()
+    elif args.cmd == "cluster":
+        cmd_cluster(max_per_topic=args.max_per_topic)
+    elif args.cmd == "price":
+        cmd_price()
+    elif args.cmd == "priority":
+        cmd_priority()
     else:
         parser.print_help()
 

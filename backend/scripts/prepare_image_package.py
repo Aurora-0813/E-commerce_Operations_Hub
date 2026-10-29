@@ -36,10 +36,33 @@ OUT_DIR = MOCK_DIR / "images"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
+def _make_synthetic_images(count: int = 50) -> int:
+    """`images_real/` 不存在时，生成一批合成图兜底。
+
+    为什么要兜底：
+        `images_real/`（50 张 AI 生成的商品图）体积大，没有进 git。
+        别人 clone 下来跑 `run_all.py`，第 [4] 步就会因为目录不存在而中断。
+
+    为什么每张颜色不同：
+        M2 用 pHash 去重。如果 50 张图完全一样，会全被去重成 1 张，
+        真实调用次数从 50 掉到 1，指标全乱。
+    """
+    from PIL import Image
+
+    REAL_DIR.mkdir(parents=True, exist_ok=True)
+    for i in range(1, count + 1):
+        rgb = (25 * (i % 10) + 5, 30 * (i % 8) + 5, 20 * (i % 6) + 5)
+        Image.new("RGB", (80, 80), rgb).save(REAL_DIR / f"{i:02d}_synthetic.png")
+    return count
+
+
 def main() -> None:
-    if not REAL_DIR.exists():
-        print(f"❌ 真实图片目录不存在：{REAL_DIR}")
-        return
+    if not REAL_DIR.exists() or not any(
+            p.suffix.lower() in IMAGE_EXTS for p in REAL_DIR.iterdir()):
+        print(f"⚠️ 真实图片目录不存在或为空：{REAL_DIR}")
+        n = _make_synthetic_images()
+        print(f"   已生成 {n} 张合成图兜底（M2 的结果会和真实图不同，但链路能跑通）")
+        print("   想要真实图：见 docs/开发指南/05_M2_多模态沙箱.md 里的生成提示词")
 
     real_images = sorted(p for p in REAL_DIR.iterdir() if p.suffix.lower() in IMAGE_EXTS)
     if not real_images:
