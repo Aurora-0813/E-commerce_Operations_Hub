@@ -242,6 +242,54 @@ class AnalysisRun(Base):
                                                  server_default=text("now()"))
 
 
+class PipelineRun(Base):
+    """一条分析链的运行记录（M7 调度）。
+
+    **为什么需要这张表（而不是让 Redis 记进度）**：
+        队列是"至少一次"投递，消息可能重复、可能丢（Redis 重启）。
+        如果"链跑到第几步"只存在消息里，一旦 worker 在
+        `XADD 下一步` 和 `XACK 当前任务` 之间崩溃，链就断了，而且没人知道。
+
+    这里的做法是：**数据库记进度，队列只负责"该干活了"这个信号**。
+        · 每跑完一个阶段 → UPDATE current_stage（原子）
+        · 崩溃 → 任务没 ACK → 被 XAUTOCLAIM 抢过来 → 从 current_stage 续跑
+        · Redis 整个挂掉 → 进度还在，恢复后重新入队即可
+
+    ⚠️ `(kind)` 上有**部分唯一索引**（`status IN ('QUEUED','RUNNING')` 时唯一）：
+        防止手滑点两次 `hub enqueue` 导致两条链同时抢同一块 GPU。
+        由数据库保证原子性——代码里"先查再插"有竞态，挡不住并发。
+    """
+    __tablename__ = "pipeline_run"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
+                                     server_default=text("gen_random_uuid()"))
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)      # full / backfill
+    status: Mapped[str] = mapped_column(Text, nullable=False,
+                                        server_default=text("'QUEUED'"))
+    # 断点：最后**跑完**的阶段名；下一次从它的下一个开始
+    current_stage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # 有阶段是降级完成的（LLM 抖动/兜底），链继续跑但要记一笔
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('QUEUED','RUNNING','DONE','DEGRADED','FAILED','DEAD')",
+            name="ck_pipeline_run_status"),
+        # 部分唯一索引：同一 kind 同时只能有一条"未结束"的链
+        Index("uq_pipeline_run_active", "kind", unique=True,
+              postgresql_where=text("status IN ('QUEUED','RUNNING')")),
+    )
+
+
 class IssueCluster(Base):
     """问题簇：多条评价聚成的同类问题。"""
     __tablename__ = "issue_cluster"

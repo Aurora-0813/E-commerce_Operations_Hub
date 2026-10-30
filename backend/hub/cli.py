@@ -488,6 +488,23 @@ def main() -> None:
     hp.add_argument("--id", dest="health_trace", default=None,
                     help="指定 trace_id（默认取最近一次全链）")
 
+    # ---- M7 调度 ----
+    en = sub.add_parser("enqueue", help="M7：把一条全链塞进队列")
+    en.add_argument("--kind", default="full", help="链的类型（默认 full）")
+
+    wk = sub.add_parser("worker", help="M7：常驻消费队列")
+    wk.add_argument("--once", action="store_true", help="只处理一条就退出（测试用）")
+    wk.add_argument("--idle", type=int, default=None,
+                    help="覆盖抢占阈值（秒）；测试时调小，不用等 10 分钟")
+
+    qp = sub.add_parser("queue", help="M7：看队列状态")
+    qp.add_argument("--dlq", action="store_true", help="列出死信明细")
+
+    dl = sub.add_parser("dlq", help="M7：死信操作")
+    dl.add_argument("action", choices=["replay"], help="replay = 重放")
+    dl.add_argument("--id", dest="run_id", required=True,
+                    help="链 ID（hub queue --dlq 能看到前 8 位）")
+
     ev = sub.add_parser("eval", help="M8：跑离线评估套件（有退出码，可接 CI）")
     ev.add_argument("--suite", default="perturbation_v1", help="用例集名（suites/<name>.yaml）")
     ev.add_argument("--strict", action="store_true", help="软门禁也要求 100%")
@@ -535,6 +552,22 @@ def main() -> None:
         # eval 有退出码（CI 用），所以跑完直接 sys.exit
         import sys
         sys.exit(cmd_eval(args.suite, strict=args.strict))
+    elif args.cmd == "enqueue":
+        import sys
+        from hub.queue.commands import enqueue
+        sys.exit(enqueue(kind=args.kind))
+    elif args.cmd == "worker":
+        import sys
+        from hub.queue.commands import worker
+        sys.exit(worker(once=args.once, idle=args.idle))
+    elif args.cmd == "queue":
+        import sys
+        from hub.queue.commands import show_queue
+        sys.exit(show_queue(dlq=args.dlq))
+    elif args.cmd == "dlq":
+        import sys
+        from hub.queue.commands import replay
+        sys.exit(replay(args.run_id))
     else:
         parser.print_help()
         return

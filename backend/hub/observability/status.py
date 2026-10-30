@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from hub.persistence.db import get_session
 from hub.persistence.models import (
     ActionProposal,
+    AnalysisRun,
     Anomaly,
     DeadLetter,
     HitlTask,
@@ -75,25 +76,58 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
             .group_by(RecordRow.platform)).all())
 
         # ---------- 漏斗 ----------
-        clusters = s.scalars(select(IssueCluster)).all()
-        n_proposal = s.scalar(select(func.count()).select_from(ActionProposal)) or 0
-        proposal_by_risk = dict(s.execute(
-            select(ActionProposal.risk_level, func.count())
-            .group_by(ActionProposal.risk_level)).all())
-        proposal_by_status = dict(s.execute(
-            select(ActionProposal.status, func.count())
-            .group_by(ActionProposal.status)).all())
-        task_by_status = dict(s.execute(
-            select(HitlTask.status, func.count()).group_by(HitlTask.status)).all())
-        n_dead = s.scalar(select(func.count()).select_from(DeadLetter)) or 0
-        n_anomaly = s.scalar(select(func.count()).select_from(Anomaly)
-                             .where(Anomaly.type == "price")) or 0
+        #
+        # ⚠️ 口径：**簇 / 异常 / 提案都只看【最近一次运行】**
+        #
+        # 为什么不能查全表：这三张表是"每次运行新建一批"（按 run_id 隔离），
+        # 为了以后算环比。所以 `select(IssueCluster)` 全表查会把同一个问题数两遍
+        # （实测：跑第二次后，"13 个簇"变成 26 个）。
+        #
+        # 而"商品/评价/差评"是 upsert 的，全表查才是对的——它们是存量。
+        from hub.persistence.repo_cluster import ClusterRepo
+        clusters = ClusterRepo().fetch_latest_clusters()
 
-        # 响应时长：批准时间 - 提案创建时间
-        decided = s.execute(
-            select(HitlTask.decided_at, ActionProposal.created_at)
-            .join(ActionProposal, ActionProposal.id == HitlTask.proposal_id)
-            .where(HitlTask.decided_at.is_not(None))).all()
+        # 只认"真正的提案运行"（带 stats.module=M5 标记）。
+        # 不认的话，hub eval 为满足外键造的那条假提案会被当成最近一次运行。
+        latest_proposal_run = s.scalar(
+            select(ActionProposal.run_id)
+            .join(AnalysisRun, AnalysisRun.id == ActionProposal.run_id)
+            .where(AnalysisRun.stats["module"].astext == "M5")
+            .order_by(ActionProposal.created_at.desc()).limit(1))
+        proposals = s.scalars(
+            select(ActionProposal)
+            .where(ActionProposal.run_id == latest_proposal_run)).all() \
+            if latest_proposal_run else []
+        proposal_by_risk: dict = {}
+        proposal_by_status: dict = {}
+        for p in proposals:
+            proposal_by_risk[p.risk_level] = proposal_by_risk.get(p.risk_level, 0) + 1
+            proposal_by_status[p.status] = proposal_by_status.get(p.status, 0) + 1
+        n_proposal = len(proposals)
+
+        pids = [p.id for p in proposals]
+        tasks = s.scalars(select(HitlTask).where(HitlTask.proposal_id.in_(pids))).all() \
+            if pids else []
+        task_by_status: dict = {}
+        decided = []
+        for t in tasks:
+            task_by_status[t.status] = task_by_status.get(t.status, 0) + 1
+            if t.decided_at:
+                decided.append((t.decided_at, t.created_at))
+        # 提案创建时间（算响应时长用）
+        created_by_pid = {p.id: p.created_at for p in proposals}
+        decided = [(t.decided_at, created_by_pid.get(t.proposal_id)) for t in tasks
+                   if t.decided_at and created_by_pid.get(t.proposal_id)]
+
+        n_dead = s.scalar(select(func.count()).select_from(DeadLetter)) or 0
+
+        latest_anomaly_run = s.scalar(
+            select(Anomaly.run_id).where(Anomaly.type == "price")
+            .order_by(Anomaly.detected_at.desc()).limit(1))
+        n_anomaly = s.scalar(
+            select(func.count()).select_from(Anomaly)
+            .where(Anomaly.type == "price")
+            .where(Anomaly.run_id == latest_anomaly_run)) if latest_anomaly_run else 0
 
         # ---------- 影响面：GMV ----------
         # ⚠️ 注意：`sales_daily.canonical_spu_id` 里存的是【平台商品 ID】（TB-0006），
@@ -175,6 +209,7 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         ("L2/L3 占比", _pct(proposal_by_risk.get("L2", 0) + proposal_by_risk.get("L3", 0),
                             n_proposal)),
         ("死信积压", f"{n_dead} 条待人工核对"),
+        ("口径", "簇/异常/提案只看【最近一次运行】；商品/评价是存量"),
     ]
 
     # ==================== ③ 数据质量 ====================

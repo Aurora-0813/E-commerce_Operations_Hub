@@ -248,10 +248,17 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
         return stats
 
     # 建一次 analysis_run（提案要挂 run_id）
+    #
+    # `stats={"module": "M5"}` 是**必须的标记**：
+    #   报表（hub status）要能区分"真正的提案运行"和"测试/工具造的临时 run"。
+    #   实测踩过：hub eval 为了让 tool_execution 的外键成立，造了一条假提案，
+    #   结果 hub status 把它当成"最近一次提案运行"，显示"生成提案 1 个"。
+    #   标记 module 之后，报表只认带标记的 run。
     from uuid import uuid4
     with get_session() as s:
         run = AnalysisRun(trace_id=f"propose-{uuid4().hex[:10]}",
-                          tenant_id="default", status="RUNNING")
+                          tenant_id="default", status="RUNNING",
+                          stats={"module": "M5"})
         s.add(run)
         s.flush()
         run_id = run.id
@@ -344,4 +351,13 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
         print(f"      args：{ {k: (v[:40] + '…' if isinstance(v, str) and len(v) > 40 else v) for k, v in args.items() if k != 'review_ids'} }")
 
     stats.elapsed_s = round(time.time() - t0, 2)
+
+    # 收尾：把这次提案运行标成 DONE（否则 analysis_run 里会一直挂 RUNNING）
+    from hub.persistence.repository import RunRepo
+    RunRepo().update_status(
+        trace_id, "DONE",
+        stats={"module": "M5",
+               "summary": {"proposals": stats.proposals,
+                           "skipped": len(stats.skipped)}},
+    )
     return stats

@@ -16,7 +16,7 @@
 
 ---
 
-## 当前进度：8 / 11 个模块
+## 当前进度：9 / 11 个模块
 
 | 模块 | 说明 | 状态 |
 | --- | --- | --- |
@@ -26,9 +26,10 @@
 | M4 | 复合分析（聚类 / 价格背离 / 优先级） | ✅ |
 | M5 | 工具网关（四道防线 + 风险分级 + 幂等 + 频控） | ✅ |
 | M6 | 执行链（提案 → 审批 → 执行 → 回查 → 补偿/死信） | ✅ |
-| **M8** | **可观测（trace/status/health）+ 评估门禁（20 条扰动用例）** | ✅ |
+| **M7** | **调度与队列（Redis Stream + 断点续跑 + 崩溃恢复）** | ✅ |
+| M8 | 可观测（trace/status/health）+ 评估门禁 | ✅ |
 | M11 | 业务数据面（同款对齐 `sku_mapping`） | ✅ |
-| M7 / M9 / M10 | 调度 / 复盘 / 运营交互 | ⬜ 待做 |
+| M9 / M10 | 效果复盘 / 运营交互 | ⬜ 待做 |
 | — | 部署、前端 | ⬜ 待做 |
 
 **实测数据**（mock 数据，3981 条评价）：
@@ -60,6 +61,16 @@ C 执行链（21 项） 重试 / 补偿回滚 / 死信 / 审批流 / 角色检�
 成本  117,782 input tokens / 8,252 output ｜视觉占 68%
       一张图 = 1,597 tokens + 3.5 秒 ｜pHash 去重省了约 425 秒
 门禁  20 条扰动用例 100%（硬门禁 19/19，软门禁 1/1），退出码 0
+```
+
+**M7 的实测**（崩溃恢复）：
+
+```text
+① Ctrl+C              当前任务未 ACK
+② hub queue           RUNNING｜断点 dqe｜PEL 1
+③ worker --idle 5     🔧 抢到闲置任务 → 从 dqe 之后开始 → DONE
+   证明：任务没丢 / 断点续跑（不从头）/ XAUTOCLAIM 真的会抢
+验收  21 项全过（断点/防重/重试/死信/重放/对账/PEL）
 ```
 
 | 模型 | 用途 | 大小 |
@@ -118,7 +129,32 @@ python -m hub.cli trace <trace_id>     # 单次链路树（哪一步慢）
 python -m hub.cli status               # 业务数据现状（含 GMV 影响面）
 python -m hub.cli health               # 最近一次运行健康度（耗时/token/降级）
 python -m hub.cli eval                 # 20 条扰动用例（有退出码，可接 CI）
+
+# M7 调度（需要 Redis）
+python -m hub.cli enqueue              # 把一条全链塞进队列
+python -m hub.cli worker               # 常驻消费（Ctrl+C 退出）
+python -m hub.cli worker --once        # 只处理一条（测试用）
+python -m hub.cli queue                # 队列深度 / PEL / 延迟 / 死信
+python -m hub.cli queue --dlq          # 死信明细
+python -m hub.cli dlq replay --id <前8位>   # 重放死信（保留断点）
 ```
+
+### Redis（M7 前置）
+
+```bash
+docker run -d --name hub-redis --restart unless-stopped \
+  -p 127.0.0.1:6379:6379 -v hub-redis-data:/data \
+  redis:7.4-alpine redis-server --appendonly yes --requirepass hub_dev_2026 \
+  --maxmemory 256mb --maxmemory-policy noeviction
+```
+
+`.env` 里配：
+
+```ini
+HUB_QUEUE__URL=redis://:hub_dev_2026@127.0.0.1:6379/0
+```
+
+**四个参数都不是可选的**：`127.0.0.1` 绑本机（暴露到局域网=挖矿目标）、`appendonly` 持久化（否则 Redis 重启丢任务）、`requirepass` 密码、`noeviction` 内存满时报错（LRU 会**静默删掉排队的任务**）。
 
 ---
 

@@ -88,6 +88,35 @@ class GatewayConf(BaseModel):
     auto_execute_max_risk: str = "L1"   # 自动执行的风险等级上限：L1 及以下自动，L2+ 要人工
 
 
+class QueueConf(BaseModel):
+    """任务队列设置（M7 调度，Redis Stream）。
+
+    为什么要 URL 而不是拆成 host/port/password：
+        密码、库号、TLS 参数以后都可能变，一个 URL 全表达得下，
+        换托管 Redis（`rediss://...`）不用改代码。
+
+    格式：redis://:密码@主机:端口/库号
+          （用户名留空，但那个冒号不能省——少了它密码会被当成用户名）
+    """
+    url: str = "redis://127.0.0.1:6379/0"
+    # 队列名（Stream key）
+    stream: str = "hub:tasks"
+    group: str = "hub-workers"
+    # 延迟重试用 ZSET（Redis Stream 没有延迟投递）
+    delayed_key: str = "hub:delayed"
+    dlq_key: str = "hub:dlq"
+    # GPU 阶段互斥锁（8GB 显存装不下两个模型同时跑）
+    gpu_lock_key: str = "hub:lock:gpu"
+    gpu_lock_ttl_s: int = 900          # 锁的自动过期（防止 worker 崩了锁不释放）
+    # 失败重试
+    max_attempts: int = 3
+    backoff_s: list[int] = [2, 8]      # 第 1 次失败等 2 秒，第 2 次等 8 秒
+    # 崩溃恢复：任务闲置超过这么久，才允许别的 worker 抢
+    # **必须大于最长阶段的耗时**（M3 实测 215s），否则会两个 worker 同时跑同一个任务
+    claim_idle_s: int = 600
+    claim_interval_s: int = 60         # 每 60 秒扫一次 PEL
+
+
 class Settings(BaseSettings):
     """
     总配置：把上面几个"分组"合并成一个总的 Settings 对象。
@@ -110,3 +139,4 @@ class Settings(BaseSettings):
     vision: VisionConf = VisionConf()  # 视觉模型（M2）
     dqe: DqeConf = DqeConf()
     gateway: GatewayConf = GatewayConf()
+    queue: QueueConf = QueueConf()    # M7 调度（Redis Stream）
