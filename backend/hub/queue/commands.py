@@ -25,6 +25,13 @@ def enqueue(kind: str = "full", params: dict | None = None) -> int:
     **防重靠数据库部分唯一索引**，不靠"先查再插"——
     两个进程同时插时，"先查"都通过，"再插"就两条了。
     这里故意让 IntegrityError 冒出来再翻译成人话。
+
+    **为什么目前只允许 kind="full"**：
+        部分唯一索引是"同 kind 只能一条"，所以 `full` 和 `backfill` 能同时存在。
+        而两条链都会跑 ingest/dqe/cluster——**同时写同一批记录，数据会打架**
+        （GPU 锁只能防抢显存，防不了两个进程同时 upsert 同一张表）。
+        所以现在把 kind 锁死；等真要做回填时，改成"全局只允许一条链"的索引
+        （`UNIQUE ((true)) WHERE status IN ('QUEUED','RUNNING')`）。
     """
     from sqlalchemy.exc import IntegrityError
 
@@ -53,6 +60,10 @@ def enqueue(kind: str = "full", params: dict | None = None) -> int:
     q.ensure_group(r)
     msg_id = q.enqueue(r, run_id)
 
+    # 清理：只保留最近 50 条【已结束】的链，避免 pipeline_run 无限增长
+    # （每天一条 + 回填，一年就是几百条；旧的不删，`hub queue` 的列表会越来越长）
+    _prune_old_runs(keep=50)
+
     print(f"✅ 已入队")
     print(f"   链 ID    {run_id}")
     print(f"   trace    {trace_id}")
@@ -60,6 +71,27 @@ def enqueue(kind: str = "full", params: dict | None = None) -> int:
     print(f"   预计耗时 {total_est_s()} 秒（{len(STAGES)} 个阶段）")
     print("\n   跑：hub worker")
     return 0
+
+
+def _prune_old_runs(keep: int = 50) -> int:
+    """删掉太旧的**已结束**链（DONE/DEGRADED/DEAD/FAILED）。
+
+    **绝不删 QUEUED/RUNNING**——那是"还没干完的活"，
+    删了就等于静默丢任务。所以过滤条件里必须带上状态。
+    """
+    from sqlalchemy import select
+
+    with get_session() as s:
+        finished = s.scalars(
+            select(PipelineRun)
+            .where(PipelineRun.status.in_(["DONE", "DEGRADED", "DEAD", "FAILED"]))
+            .order_by(PipelineRun.created_at.desc())
+        ).all()
+        old = finished[keep:]
+        for row in old:
+            s.delete(row)
+        s.commit()
+    return len(old)
 
 
 # ==================== worker ====================

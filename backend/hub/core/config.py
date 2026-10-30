@@ -111,9 +111,13 @@ class QueueConf(BaseModel):
     # 失败重试
     max_attempts: int = 3
     backoff_s: list[int] = [2, 8]      # 第 1 次失败等 2 秒，第 2 次等 8 秒
-    # 崩溃恢复：任务闲置超过这么久，才允许别的 worker 抢
-    # **必须大于最长阶段的耗时**（M3 实测 215s），否则会两个 worker 同时跑同一个任务
-    claim_idle_s: int = 600
+    # 崩溃恢复：任务闲置超过这么久，才允许别的 worker 抢。
+    #
+    # **有了 PEL 心跳续租，这个值不再需要"大于最长阶段耗时"**：
+    #   处理消息时后台线程每 claim_idle_s/4 秒 XCLAIM 一次，把闲置时间重置为 0，
+    #   所以"正在跑的任务"永远不会被误判成崩了。
+    #   120 秒 = 真崩了 2 分钟内被接管（原来 600 秒要等 10 分钟）。
+    claim_idle_s: int = 120
     claim_interval_s: int = 60         # 每 60 秒扫一次 PEL
 
 

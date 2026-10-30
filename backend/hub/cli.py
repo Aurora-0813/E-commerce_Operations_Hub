@@ -489,13 +489,17 @@ def main() -> None:
                     help="指定 trace_id（默认取最近一次全链）")
 
     # ---- M7 调度 ----
-    en = sub.add_parser("enqueue", help="M7：把一条全链塞进队列")
-    en.add_argument("--kind", default="full", help="链的类型（默认 full）")
+    # 注意：**没有 `--kind` 参数**。现在只允许 kind="full"，
+    # 因为 `full` 和 `backfill` 能同时入队（部分唯一索引是"同 kind 唯一"），
+    # 而两条链会同时写 record/issue_cluster → 数据打架。
+    # 等真要回填时，把索改成"全局只允许一条链"再加 kind。
+    sub.add_parser("enqueue", help="M7：把一条全链塞进队列")
 
     wk = sub.add_parser("worker", help="M7：常驻消费队列")
     wk.add_argument("--once", action="store_true", help="只处理一条就退出（测试用）")
     wk.add_argument("--idle", type=int, default=None,
-                    help="覆盖抢占阈值（秒）；测试时调小，不用等 10 分钟")
+                    help="覆盖抢占阈值（秒）。有 PEL 心跳续租，调小是安全的"
+                         "（只影响'真崩了多久被接管'）")
 
     qp = sub.add_parser("queue", help="M7：看队列状态")
     qp.add_argument("--dlq", action="store_true", help="列出死信明细")
@@ -555,7 +559,7 @@ def main() -> None:
     elif args.cmd == "enqueue":
         import sys
         from hub.queue.commands import enqueue
-        sys.exit(enqueue(kind=args.kind))
+        sys.exit(enqueue())
     elif args.cmd == "worker":
         import sys
         from hub.queue.commands import worker

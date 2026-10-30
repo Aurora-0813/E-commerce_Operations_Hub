@@ -24,6 +24,7 @@
 import os
 import socket
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,61 @@ def process(run_id: str, r: redis.Redis) -> str:
     return final
 
 
+# ==================== PEL 心跳续租 ====================
+
+class PelRenewer:
+    """后台线程：定期"摸一下"正在处理的那条消息，重置它的闲置时间。
+
+    **为什么必须有它**：
+        Redis 的 XAUTOCLAIM 判断"任务是不是崩了"，看的是**消息的闲置时间**。
+        而 worker 跑 M2 要 180 秒，这 180 秒里它**根本不碰 Redis 里那条消息**
+        → 闲置时间真的涨到 180 秒 → 抢占阈值必须大于它，否则
+        "正在跑的任务"会被当成"崩了的任务"抢走，两个 worker 同时写同一批数据。
+
+    **续租之后**：
+        `XCLAIM <msg> JUSTID` 会把闲置时间重置为 0，
+        所以阈值可以设得很短（比如 60 秒），只受"续租间隔"约束，**与阶段耗时无关**。
+        → 真崩了 1 分钟就被接管（而不是 10 分钟）
+        → 新增一个更慢的阶段也不会让阈值失效（不再依赖 est_s 估算）
+
+    **间隔为什么是 claim_idle // 4**：
+        阈值 60s → 每 15s 续一次；阈值 5s → 每 1.25s 续一次。
+        这样**任何阈值都是安全的**，不用为"演示"留危险开关。
+    """
+
+    def __init__(self, r: redis.Redis, msg_id: str, claim_idle_s: int):
+        self.r = r
+        self.msg_id = msg_id
+        self.interval = max(1.0, claim_idle_s / 4.0)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name=f"pel-renew-{self.msg_id}")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                # justid=True：只返回 ID，**不增加投递计数**（否则重试次数会虚高）
+                self.r.xclaim(_q.stream, _q.group, worker_id(),
+                              min_idle_time=0, message_ids=[self.msg_id],
+                              justid=True)
+            except Exception:                 # noqa: BLE001
+                pass                           # 续租失败不致命：真崩了照样会被接管
+
+
+def _all_stages():
+    from hub.queue.stages import STAGES
+    return STAGES
+
+
 def _stage_degraded(stage_name: str) -> bool:
     """这个阶段是不是"降级完成"了？
 
@@ -159,9 +215,21 @@ def _stage_degraded(stage_name: str) -> bool:
 
     from hub.persistence.models import AnalysisRun
 
-    module = {"mm": "M2", "topic": "M3"}.get(stage_name)
+    module = {"mm": "M2", "topic": "M3", "propose": "M5"}.get(stage_name)
     if not module:
         return False
+
+    # M5（提案）的"降级"没有 analysis_run.status 可看——它的质量信号在
+    # 草稿的合规命中上：出现【红线】（承诺金额/索要隐私）就说明这批提案不能直接发。
+    if module == "M5":
+        from hub.persistence.models import ReviewReplyDraft
+        with get_session() as s:
+            latest = s.scalars(select(ReviewReplyDraft)
+                               .order_by(ReviewReplyDraft.created_at.desc())
+                               .limit(20)).all()
+        return any(f.startswith("红线") for d in latest
+                   for f in (d.compliance_flags or []))
+
     with get_session() as s:
         run = s.scalars(select(AnalysisRun)
                         .where(AnalysisRun.stats["module"].astext == module)
@@ -182,7 +250,12 @@ def run(once: bool = False, idle_s: int | None = None,
     """worker 主循环。
 
     :param once: 只处理一条消息就退出（测试用）
-    :param idle_s: 覆盖配置里的"闲置多久算崩了"（测试时调小，不用等 10 分钟）
+    :param idle_s: 覆盖配置里的"闲置多久算崩了"
+
+    **为什么可以放心调小 idle_s**：
+        处理每条消息时会启动 `PelRenewer` 后台线程续租（间隔 = idle_s/4），
+        所以"正在跑的任务"的闲置时间永远接近 0，不会被别人抢。
+        阈值只影响"真崩了之后多久被接管"，不再是"必须大于最长阶段耗时"。
     """
     claim_idle = idle_s or _q.claim_idle_s
     r = q.get_redis()
@@ -194,6 +267,12 @@ def run(once: bool = False, idle_s: int | None = None,
         print("         .env 里的 HUB_QUEUE__URL 是否正确")
         return 2
     q.ensure_group(r)
+
+    # 阈值下限：太小会让"续租间隔"变得过于频繁（idle_s/4）。
+    # 注意这里**不再检查"是否大于最长阶段耗时"**——心跳续租之后那个约束不存在了。
+    if claim_idle < 4:
+        print(f"❌ 抢占阈值 {claim_idle}s 太小（至少 4 秒）")
+        return 2
 
     me = worker_id()
     print(f"worker 启动：{me}")
@@ -238,6 +317,10 @@ def run(once: bool = False, idle_s: int | None = None,
             current_msg = (msg_id, run_id)
             print(f"\n▶ 领到任务 {run_id[:8]}（消息 {msg_id}）")
 
+            # ★ 心跳续租：从领到消息开始，后台线程每 idle_s/4 秒摸一下，
+            #   保证"正在跑的任务"的闲置时间永远接近 0（不会被当成崩了抢走）。
+            renewer = PelRenewer(r, msg_id, claim_idle)
+            renewer.start()
             try:
                 process(run_id, r)
                 r.xack(_q.stream, _q.group, msg_id)   # ★ 跑完才 ACK
@@ -248,6 +331,8 @@ def run(once: bool = False, idle_s: int | None = None,
             except Exception as e:                    # noqa: BLE001
                 current_msg = None                    # 交给重试逻辑处理
                 _handle_failure(r, run_id, e, msg_id)
+            finally:
+                renewer.stop()
             if once:
                 print(f"\n--once 模式：处理了 {processed} 条，退出", flush=True)
                 return 0
@@ -269,7 +354,9 @@ def _handle_failure(r: redis.Redis, run_id: str, e: Exception, msg_id: str) -> N
     attempt = (row.attempt or 1) if row else 1
     err = f"{type(e).__name__}: {e}"
     _update(run_id, error=err[:500], heartbeat_at=now())
-    print(f"  ❌ 失败（第 {attempt} 次）：{err[:120]}")
+    # 注意措辞：attempt 在【进入任务时】就 +1 了，所以它表示"第几次尝试"，
+    # 不是"第几次失败"。写清楚，否则排查时会数错。
+    print(f"  ❌ 第 {attempt} 次尝试失败：{err[:120]}")
 
     if attempt >= _q.max_attempts:
         _update(run_id, status="DEAD", finished_at=now())
@@ -301,11 +388,15 @@ def _claim_stale(r: redis.Redis, me: str, idle_s: int, verbose: bool) -> None:
         run_id = (fields or {}).get("run_id", "")
         if verbose:
             print(f"  🔧 抢到闲置任务 {run_id[:8]}（原 worker 可能崩了）")
+        renewer = PelRenewer(r, msg_id, claim_idle)
+        renewer.start()
         try:
             process(run_id, r)
             r.xack(_q.stream, _q.group, msg_id)
         except Exception as e:                     # noqa: BLE001
             _handle_failure(r, run_id, e, msg_id)
+        finally:
+            renewer.stop()
 
 
 def _reconcile(r: redis.Redis, idle_s: int, verbose: bool) -> None:
