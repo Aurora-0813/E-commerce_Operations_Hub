@@ -64,6 +64,16 @@ class CallContext:
     trace_id: str = ""
     run_id: str = ""
     proposal_id: str = ""
+    # 本次调用的【风险下限】覆盖（来自动作经验，见 hub/action/experience.py）
+    #
+    # ⚠️ 只能【升】不能【降】：网关取 max(工具声明的等级, 这个值)。
+    #    为什么必须有这个限制：
+    #        如果允许降，那么"历史上有一次成功"就能让 L3（改价）变成自动执行——
+    #        那等于用统计证据去拆掉人工审批的红线。
+    #    为什么需要升：
+    #        某个工具历史上有害时，应该在【这一次】就要求人工确认，
+    #        而不是去改工具定义（工具定义是全局的，不该被个案污染）。
+    risk_floor: str | None = None
 
     def has_role(self, required: str | None) -> bool:
         """检查角色。required=None 表示不限制（L0/L1 就是这样）。

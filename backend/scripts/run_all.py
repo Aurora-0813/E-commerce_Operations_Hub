@@ -120,6 +120,27 @@ def summary() -> None:
         print(f"  {name:16} {n}")
 
 
+def _pyflakes_undefined() -> list[str] | None:
+    """用 pyflakes 查"未定义的名字"。返回问题列表；没装 pyflakes 返回 None。
+
+    **只让"未定义名字"挡路**，其他（未使用的 import、f-string 没占位符）
+    只当提示 —— 那些是风格问题，不该阻塞整条全链。
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pyflakes",
+             str(_BACKEND_DIR / "hub"), str(_BACKEND_DIR / "scripts")],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    if r.returncode < 0:            # 进程被杀之类的，不当作检查结果
+        return None
+    return [ln for ln in (r.stdout or "").splitlines()
+            if "undefined name" in ln]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="全链验证：原始导出 → 归因报告")
     ap.add_argument("--no-reset", action="store_true", help="不清空数据库")
@@ -132,6 +153,41 @@ def main() -> None:
 
     t0 = time.time()
     n = 0
+
+    # 第 0 步：代码自检（语法 + 未定义名字）
+    #
+    # 为什么要放在【清库之前】：
+    #   只要有一处错，全链会先清库、再崩 —— 库被清了，要的东西没跑出来。
+    #   实测踩过：编辑时删掉行尾换行导致两行粘连（3 次），
+    #             以及 `select` / `claim_idle` 两个未定义名字（pyflakes 抓出来的）。
+    #
+    # **为什么光有 compileall 不够**：
+    #   `select(TraceSpan...)` 语法完全合法，只是那个名字没 import ——
+    #   compileall 查不出来，要跑到那一行才 NameError。
+    #   而这两处错误都藏在"正常路径不会走"的分支里（hub trace 不带 id、
+    #   崩溃恢复的续租），所以一直没炸，测试还假绿。
+    #   → 必须加 pyflakes 查"未定义的名字"。
+    n += 1
+    step(n, "代码自检（语法 + 未定义名字）")
+    import compileall
+    ok = all([
+        compileall.compile_dir(str(_BACKEND_DIR / "hub"), quiet=2),
+        compileall.compile_dir(str(_BACKEND_DIR / "scripts"), quiet=2),
+    ])
+    if not ok:
+        raise SystemExit("❌ 语法错误，已中止（数据库未被清空）")
+
+    undefined = _pyflakes_undefined()
+    if undefined is None:
+        print("  ⚠️ 没装 pyflakes，跳过了\"未定义名字\"检查"
+              "（pip install pyflakes 可以打开）")
+    elif undefined:
+        print("  ❌ 发现未定义的名字（跑到那行必崩）：")
+        for line in undefined:
+            print(f"     {line}")
+        raise SystemExit("❌ 未定义名字，已中止（数据库未被清空）")
+    else:
+        print("  语法通过｜无未定义名字")
 
     if not args.no_reset:
         n += 1

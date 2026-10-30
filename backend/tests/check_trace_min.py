@@ -6,7 +6,7 @@ trace 的最小定位脚本（30 秒内跑完，用来找卡在哪一步）
 **只要看最后打印的是哪一行，就知道卡在哪。**
 
 运行：
-    python tests\check_trace_min.py
+    python tests\\check_trace_min.py
 """
 import sys
 import time

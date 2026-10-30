@@ -8,7 +8,7 @@
     `action_outcome` 是"一个受影响商品一条"（配对需要），
     但 DID 的统计单位是【组】，所以这里先按 proposal 把商品聚起来。
 """
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -16,7 +16,7 @@ from sqlalchemy import select
 from hub.persistence.db import get_session
 from hub.persistence.models import ActionOutcome, ActionProposal, PromoCalendar, SpuCatalog
 from hub.retro.did import DidResult, compute, judge
-from hub.retro.metrics import aggregate, build_input
+from hub.retro.metrics import build_input
 
 MIN_CONTROL = 3          # 对照组至少要几个商品，少于这个数判"对照组不足"
 

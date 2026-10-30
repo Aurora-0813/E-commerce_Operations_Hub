@@ -388,7 +388,12 @@ def _claim_stale(r: redis.Redis, me: str, idle_s: int, verbose: bool) -> None:
         run_id = (fields or {}).get("run_id", "")
         if verbose:
             print(f"  🔧 抢到闲置任务 {run_id[:8]}（原 worker 可能崩了）")
-        renewer = PelRenewer(r, msg_id, claim_idle)
+        # ⚠️ 这里原来写的是 `claim_idle`——它只是 `run()` 里的局部变量，
+        #    在 `_claim_stale()` 这个函数里根本不存在 → NameError。
+        #    而 NameError 被外层 except 吞掉，"任务最终完成"看起来正常，
+        #    所以崩溃恢复的测试一直是假绿（续租那一步其实没生效）。
+        #    正确值是这个函数的入参 idle_s（由 run() 传进来）。
+        renewer = PelRenewer(r, msg_id, idle_s)
         renewer.start()
         try:
             process(run_id, r)

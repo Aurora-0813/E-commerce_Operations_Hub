@@ -36,3 +36,13 @@ pyyaml                     # M8 评估用例集（suites/*.yaml）
 pytest
 pytest-asyncio
 httpx
+
+# ============ 代码检查 ============
+# pyflakes：查"未定义的名字"。
+#
+# 为什么单独列出来：`compileall` 只查语法，查不出 `select(...)` 里 select 没 import
+# 这类错误（语法完全合法，跑到那行才 NameError）。
+# 实测踩过两次（hub trace 不带 id、worker 崩溃恢复的续租），
+# 而且都藏在"正常路径不会走"的分支里，测试还假绿。
+# `scripts/run_all.py` 的第 0 步会用它，只让 undefined name 挡路。
+pyflakes

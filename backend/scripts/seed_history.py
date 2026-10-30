@@ -33,7 +33,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from sqlalchemy import delete, select                      # noqa: E402
+from sqlalchemy import delete, func, select                    # noqa: E402
 
 from hub.action.outcome import BASELINE_DAYS, OBSERVE_DAYS  # noqa: E402
 from hub.persistence.db import get_session                  # noqa: E402
@@ -42,6 +42,8 @@ from hub.persistence.models import (                        # noqa: E402
     ActionProposal,
     AnalysisRun,
     PromoCalendar,
+    Record as RecordRow,
+    ReviewTopic,
     SpuCatalog,
 )
 
@@ -57,6 +59,27 @@ def _ts(d: date) -> datetime:
 def _load_rows() -> list[dict]:
     with open(HISTORY_CSV, encoding="utf-8") as f:
         return [r for r in csv.DictReader(f) if r["组"] != "CONTROL"]
+
+
+def _dominant_topic(spus: list[str]) -> str:
+    """这组商品的最主要问题类型（成员评价里出现最多的 topic）。
+
+    为什么需要：经验回灌按 (topic, 工具) 统计战绩，
+    而这 4 个历史动作是 spu 级、没有 cluster_id，反推不出 topic。
+    生成时算一次、写进提案，下游就不用猜。
+    """
+    if not spus:
+        return ""
+    with get_session() as s:
+        rows = s.execute(
+            select(ReviewTopic.topic,
+                   func.count())
+            .join(RecordRow, RecordRow.id == ReviewTopic.record_id)
+            .where(RecordRow.platform_spu_id.in_(spus))
+            .group_by(ReviewTopic.topic)
+            .order_by(func.count().desc())
+        ).all()
+    return rows[0][0] if rows else ""
 
 
 def _spus_of(titles: list[str]) -> list[str]:
@@ -114,6 +137,11 @@ def main() -> None:
             continue
 
         # ① proposal + run（时间戳 = 干预日）
+        #
+        # `args["topic"]` 必须写：经验回灌（experience.py）按 (topic, 工具) 统计战绩。
+        # 不写的话这 4 个历史动作对回灌完全不可见——它们是 spu 级动作，
+        # 没有 cluster_id，下游反推不出 topic。
+        group_topic = _dominant_topic(spus)
         trace_id = f"history-{uuid4().hex[:10]}"
         with get_session() as s:
             run = AnalysisRun(trace_id=trace_id, tenant_id="default", status="DONE",
@@ -126,7 +154,7 @@ def main() -> None:
                 run_id=run.id, trace_id=trace_id,
                 tool_name=action, tool_version="1.0.0",
                 args={"spu_id": spus[0], "legacy": True,
-                      "group": gname, "spus": spus},
+                      "group": gname, "spus": spus, "topic": group_topic},
                 risk_level="L1",
                 evidence_refs=[], rationale=f"历史干预 {gname}：{row['备注']}",
                 dry_run=False, status="EXECUTED",

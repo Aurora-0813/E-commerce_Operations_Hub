@@ -115,14 +115,32 @@ def _invoke_inner(call: ToolCall, ctx: CallContext, *, approved: bool = False) -
 
     # ---------- ⑤ 分级：L3 转人工，L2 转审批（都不执行）----------
     # approved=True 表示"人已经批过了"，直接往下执行
+    #
+    # 有效等级 = max(工具声明的等级, ctx.risk_floor)
+    #   风险下限只能【升】—— 见 CallContext.risk_floor 的注释。
+    #   这样"经验判断这个工具历史上有害"就能在【这一次】要求人工确认，
+    #   而不需要去改工具定义（工具定义是全局的，不该被个案污染）。
     if not approved:
-        if spec.risk_level == RiskLevel.L3:
+        eff_risk = _effective_risk(spec.risk_level, ctx.risk_floor)
+        if eff_risk == RiskLevel.L3:
             return _pending(call, ctx, Decision.PENDING_HITL, spec, args, t0)
-        if spec.risk_level == RiskLevel.L2:
+        if eff_risk == RiskLevel.L2:
             return _pending(call, ctx, Decision.PENDING_APPROVAL, spec, args, t0)
 
     # ---------- ③ 幂等（占位）→ 执行 → 回查 ----------
     return _execute(call, ctx, spec, args, key, t0)
+
+
+def _effective_risk(declared: str, floor: str | None) -> str:
+    """取"工具声明等级"和"本次风险下限"里更高的那个。
+
+    L0 < L1 < L2 < L3。上限只升不降 —— 允许降就等于用统计证据
+    拆掉"改价必须有人点头"这类红线。
+    """
+    order = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+    if not floor:
+        return declared
+    return declared if order.get(declared, 9) >= order.get(floor, 9) else floor
 
 
 # ==================== 执行 ====================

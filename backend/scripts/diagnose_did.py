@@ -29,7 +29,7 @@ from sqlalchemy import select                              # noqa: E402
 
 from hub.persistence.db import get_session                  # noqa: E402
 from hub.persistence.models import ActionOutcome            # noqa: E402
-from hub.retro.metrics import build_input, per_spu_counts   # noqa: E402
+from hub.retro.metrics import build_input            # noqa: E402
 
 
 def _row(tag: str, c: dict) -> str:

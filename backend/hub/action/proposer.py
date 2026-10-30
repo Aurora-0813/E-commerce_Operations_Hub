@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from hub.action.compliance import check as check_compliance
 from hub.action.compliance import flag_strings
+from hub.action.experience import advise
 from hub.core.tracing import traced
 from hub.llm import TextLLM, get_text_llm
 from hub.persistence.db import get_session
@@ -232,6 +233,26 @@ def _build_args(tool: str, cluster, members: list, topic: str, llm: TextLLM,
     }
 
 
+def _apply_advice(topic: str, default_tool: str, adv) -> tuple[str, str | None, str]:
+    """把经验建议应用到"选哪个工具 / 要不要降级"上。**纯函数，可单测。**
+
+    :return: (最终工具, 要升到的风险等级或 None, 给运营看的说明)
+
+    为什么单独抽出来：
+        在真实数据上它**永远返回 (default_tool, None)**（样本不够门槛），
+        所以"接线有没有接错"在真实数据上根本看不出来。
+        而接错的后果很具体：库里写着 L2、实际却自动执行了
+        —— **看起来降级了，其实没降**，是最危险的一种"假安全"。
+        所以必须能用构造数据测（见 tests/check_advice_wiring.py）。
+    """
+    if adv is None:
+        return default_tool, None, ""
+    tool = adv.prefer_tool or default_tool
+    floor = "L2" if adv.escalate else None
+    note = adv.reason if adv.has_advice else ""
+    return tool, floor, note
+
+
 @traced("m5.propose")
 def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> ProposalStats:
     """给 P0/P1 的簇生成提案（写库，不执行）。"""
@@ -286,7 +307,16 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
             continue
 
         topic = _dominant_topic(cluster.id, members)
-        tool_name = TOOL_BY_TOPIC.get(topic, "review.draft_reply")
+        default_tool = TOOL_BY_TOPIC.get(topic, "review.draft_reply")
+
+        # ★ 动作经验回灌（M9 → M5 的闭环）
+        #
+        #   注意：**这里不改工具的 risk_level，也不改工具定义**。
+        #   经验只影响两件事：选哪个工具（prefer_tool）、
+        #   以及这一次要不要人工确认（escalate → 风险下限 L2）。
+        adv = advise(topic, default_tool)
+        tool_name, risk_floor, exp_note = _apply_advice(topic, default_tool, adv)
+
         spec = get_spec(tool_name)
         if spec is None:
             stats.skipped.append(f"{cluster.label}（工具未注册：{tool_name}）")
@@ -308,6 +338,15 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
             stats.skipped.append(f"{cluster.label}（构造参数失败：{e}）")
             continue
 
+        # ★ 把 topic 写进 args：这是"我针对哪一类问题生成"的真实元数据。
+        #
+        #   为什么要落盘：下游的经验回灌（hub/action/experience.py）要按
+        #   (topic, 工具) 统计历史战绩。而 listing.update_desc 这类动作的参数是
+        #   spu_id、**没有 cluster_id**，下游没法从簇反推 topic ——
+        #   结果就是"生成时明明知道 topic，下游却看不见"。
+        #   实测踩过：改描述的历史结论对经验回灌完全不可见。
+        args["topic"] = topic
+
         # 依据：这个簇本身
         evidence = {"issue_cluster": str(cluster.id)}
 
@@ -324,6 +363,9 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
         except Exception:                       # noqa: BLE001
             llm_reason = f"{cluster.review_count} 条差评，需尽快处理"
         rationale = f"「{cluster.label}」{llm_reason}"
+        # 把经验判断的依据挂上去 —— 运营要能看到"系统为什么这么选/为什么降级"
+        if exp_note:
+            rationale = f"{rationale}（经验：{exp_note}）"
 
         with get_session() as s:
             p = ActionProposal(
@@ -332,7 +374,11 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
                 tool_name=tool_name,
                 tool_version=spec.version,
                 args=args,
-                risk_level=spec.risk_level,
+                # 提案记录"实际生效的等级"：经验要求收紧时写 L2（只升不降）。
+                # ⚠️ 关键：这个值必须被【传给网关】（cli.cmd_propose 里 risk_floor=p.risk_level），
+                #    否则就是"库里写着 L2、实际却自动执行了"——看起来降级了，其实没降。
+                risk_level=risk_floor or spec.risk_level,
+                # 实际生效等级 = max(提案等级, 工具声明)，网关侧再取一次 max
                 evidence_refs=[evidence],       # 只放依据
                 rationale=rationale,            # 理由单独一列
                 dry_run=True,
@@ -346,7 +392,10 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
         stats.proposals += 1
         stats.ids.append(pid)
         print(f"  提案 {stats.proposals}: [{cluster.priority_tier}] {cluster.label} "
-              f"（{topic}）→ {tool_name} [{spec.risk_level}]")
+              f"（{topic}）→ {tool_name} [{spec.risk_level}]"
+              + ("  ⬆️ 经验降级为 L2" if risk_floor else ""))
+        if exp_note:
+            print(f"      经验：{exp_note}")
         print(f"      理由：{rationale}")
         print(f"      args：{ {k: (v[:40] + '…' if isinstance(v, str) and len(v) > 40 else v) for k, v in args.items() if k != 'review_ids'} }")
 

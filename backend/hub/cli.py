@@ -248,7 +248,8 @@ def cmd_propose(max_proposals: int = 6, execute: bool = True) -> None:
     print("\n=== 过网关 ===")
     # 用 manager 角色：L0/L1 会直接执行（设计如此），L2/L3 依然要人批
     from hub.core.tracing import current_trace_id
-    ctx = CallContext(role="manager", trace_id=current_trace_id() or "propose-cli")
+    base_ctx = CallContext(role="manager",
+                           trace_id=current_trace_id() or "propose-cli")
     tally = {}
     for pid in stats.ids:
         with get_session() as s:
@@ -262,6 +263,11 @@ def cmd_propose(max_proposals: int = 6, execute: bool = True) -> None:
                 proposal_id=pid,
             )
             label = (p.rationale or "")[:30]
+            # 提案上的 risk_level 若被"经验回灌"提到 L2，就要在【这一次】真的要求人批
+            # （网关按 max(工具声明, risk_floor) 决策，只能升不能降）
+            risk_floor = p.risk_level
+        ctx = CallContext(role=base_ctx.role, trace_id=base_ctx.trace_id,
+                          proposal_id=pid, risk_floor=risk_floor)
         r = invoke(call, ctx)
         tally[r.decision.value] = tally.get(r.decision.value, 0) + 1
         task = (r.detail or {}).get("hitl_task_id")
@@ -320,9 +326,15 @@ def cmd_trace(trace_id: str | None = None) -> None:
     """M8：看一次运行的链路树（不传 trace_id 就列最近的）。"""
     from sqlalchemy import func
 
+    from sqlalchemy import func, select
+
     from hub.core.tracing import print_tree
     from hub.persistence.db import get_session
     from hub.persistence.models import TraceSpan
+
+    # ⚠️ 这里曾经漏了 `select`/`func` 的 import：
+    #    因为平时都带 trace_id 调用，跳过了这个分支，所以一直没炸。
+    #    是 pyflakes 抓出来的（compileall 只能查语法，查不出未定义的名字）。
 
     if not trace_id:
         with get_session() as s:
