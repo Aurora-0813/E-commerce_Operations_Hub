@@ -386,11 +386,28 @@ class ActionProposal(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'PROPOSED'"))
+    # 这个提案针对哪一类问题（quality / size / logistics …）
+    #
+    # ⚠️ 为什么单独一列，而不是塞进 args：
+    #    它不是"要传给工具的输入"，是"这个提案的属性"。
+    #    实测踩过：一度写进 args["topic"]，结果 7 个提案全被网关拒了
+    #    （args_schema 里没有 topic 这个字段 → PARAM_INVALID）。
+    #    网关的校验是对的，错的是我们往工具参数里塞了元数据。
+    #
+    #    为什么必须落盘：经验回灌（action/experience.py）要按 (topic, 工具)
+    #    统计战绩。而 `listing.update_desc` 的 args 是 spu_id、没有 cluster_id，
+    #    下游没法从簇反推 topic —— 不落盘，改描述的历史结论就整类丢失。
+    topic: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  server_default=text("now()"))
 
     __table_args__ = (
         CheckConstraint("risk_level IN ('L0','L1','L2','L3')", name="ck_proposal_risk"),
+        # SKIPPED = "这个簇被跳过了，原因是 X"（见 proposer._record_skipped）
+        # 有了它，"每个高优簇都有明确去向"才成立：要么 PROPOSED，要么 SKIPPED，
+        # 两者都没有才是异常。
+        CheckConstraint("status IN ('PROPOSED','PENDING_APPROVAL','APPROVED','REJECTED',"
+                        "'EXECUTED','SKIPPED')", name="ck_proposal_status"),
     )
 
 

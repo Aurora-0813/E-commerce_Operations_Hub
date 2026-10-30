@@ -11,6 +11,7 @@
     开发期用命令行跑一次，比写临时脚本方便。以后会扩展成完整 hubctl。
 """
 import argparse
+import sys
 from uuid import uuid4
 
 
@@ -380,6 +381,13 @@ def cmd_status() -> None:
     print("      想看「最近一次跑得怎么样」，用 `hub health`。")
 
 
+def cmd_today() -> None:
+    """M10：今天该做什么（运营第一眼看到的）。"""
+    from hub.interact.today import collect, print_today
+
+    print_today(collect())
+
+
 def cmd_health(trace_id: str | None = None) -> None:
     """M8：最近一次运行的健康度（工程看）。"""
     from hub.observability.health import collect
@@ -445,6 +453,12 @@ def cmd_eval(suite: str = "perturbation_v1", strict: bool = False) -> int:
 
 def main() -> None:
     """CLI 主入口。"""
+    # 输出适配：编不了的字符换成等价 ASCII，而不是崩/变成 `?`
+    #   直接输出时是 ✅/⚠️/🔴；接管道（GBK）时变成 [OK]/[!]/* —— **两边都看得懂**。
+    #   细节见 hub/core/ui.py。
+    from hub.core.ui import install as _install_ui
+    _install_ui()
+
     parser = argparse.ArgumentParser(prog="hub", description="跨平台电商 AI 运营决策中枢 CLI")
     # 全局开关：跑完打印本次调用的链路树（放在子命令前面，如 `hub --trace mm ...`）
     parser.add_argument("--trace", action="store_true",
@@ -510,6 +524,7 @@ def main() -> None:
                     help="trace ID（不传就列最近的 10 次）")
 
     sub.add_parser("status", help="M8：业务数据现状（运营看）")
+    sub.add_parser("today", help="M10：今天该做什么（运营第一眼）")
     hp = sub.add_parser("health", help="M8：最近一次运行的健康度（工程看）")
     hp.add_argument("--id", dest="health_trace", default=None,
                     help="指定 trace_id（默认取最近一次全链）")
@@ -583,28 +598,30 @@ def main() -> None:
         cmd_trace(args.trace_id)
     elif args.cmd == "status":
         cmd_status()
+    elif args.cmd == "today":
+        cmd_today()
     elif args.cmd == "health":
         cmd_health(getattr(args, "health_trace", None))
     elif args.cmd == "retro":
         cmd_retro(dry_run=args.dry_run, all_=args.all)
     elif args.cmd == "eval":
         # eval 有退出码（CI 用），所以跑完直接 sys.exit
-        import sys
+        # ⚠️ 这里**不能**写 `import sys`：函数里任何一处 `import sys`
+        #    都会让 sys 变成 main() 的局部变量，于是函数开头的
+        #    `sys.stdout.reconfigure(...)` 变成"引用前赋值"→ UnboundLocalError。
+        #    （实测踩过；pyflakes 报的是 "local variable 'sys' referenced before
+        #      assignment"，不是 "undefined name"，所以只过滤 undefined name 会漏。）
         sys.exit(cmd_eval(args.suite, strict=args.strict))
     elif args.cmd == "enqueue":
-        import sys
         from hub.queue.commands import enqueue
         sys.exit(enqueue())
     elif args.cmd == "worker":
-        import sys
         from hub.queue.commands import worker
         sys.exit(worker(once=args.once, idle=args.idle))
     elif args.cmd == "queue":
-        import sys
         from hub.queue.commands import show_queue
         sys.exit(show_queue(dlq=args.dlq))
     elif args.cmd == "dlq":
-        import sys
         from hub.queue.commands import replay
         sys.exit(replay(args.run_id))
     else:

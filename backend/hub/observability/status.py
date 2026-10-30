@@ -15,7 +15,7 @@
 
 指标分三块：
     ① 规模与影响  —— 有多少东西、值多少钱
-    ② 处理漏斗    —— 发现了多少、做了多少、积压多少
+    ② 处理漏斗    —— 发现了多少、做了多少、卡在谁手里
     ③ 数据质量    —— 这份数据能不能信
 """
 from decimal import Decimal
@@ -42,10 +42,20 @@ def _pct(a: float, b: float) -> str:
 
 
 def _money(v: Decimal | float | None) -> str:
+    """金额显示。
+
+    ⚠️ 用全角 `￥`（U+FFE5）而不是半角 `¥`（U+00A5）：
+        **半角那个不在 GBK 里**。中文 Windows 上，一旦输出被重定向/接管道
+        （`| Select-String`、写日志、CI 抓输出），Python 会用 locale 默认编码
+        （GBK）→ 遇到 `¥` 直接 UnicodeEncodeError 崩溃。
+        实测踩过：`hub status | Select-String ...` 直接 traceback，
+        也就是说**这个 CLI 在脚本/CI 里根本不能用**。
+        全角 `￥` 在 GBK 里有编码，两边都不崩。
+    """
     if not v:
-        return "¥0"
+        return "￥0"
     v = float(v)
-    return f"¥{v / 10000:.1f} 万" if v >= 10000 else f"¥{v:.0f}"
+    return f"￥{v / 10000:.1f} 万" if v >= 10000 else f"￥{v:.0f}"
 
 
 def collect() -> list[tuple[str, list[tuple[str, str]]]]:
@@ -186,8 +196,17 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
     # ==================== ② 处理漏斗 ====================
 
     p0p1 = [c for c in clusters if c.priority_tier in ("P0", "P1")]
-    proposed_tools = n_proposal
-    backlog = max(0, len(p0p1) - proposed_tools)      # P0/P1 里还没出提案的
+    # 一个 P0/P1 簇算"有去向"的条件：有提案行（PRPOSED/EXECUTED/SKIPPED 都算）。
+    # ⚠️ 不能只数"提案条数"：一个簇可能出 0 条（漏了）或多条（不会）。
+    #    更要紧的是**关系要靠 evidence_refs 判断**，不能从 args 里猜
+    #    （listing.update_desc 的 args 是 spu_id，没有 cluster_id）。
+    covered_clusters: set[str] = set()
+    for p in s.scalars(select(ActionProposal)).all():
+        for ref in (p.evidence_refs or []):
+            cid = ref.get("issue_cluster") if isinstance(ref, dict) else None
+            if cid:
+                covered_clusters.add(str(cid))
+    backlog = sum(1 for c in p0p1 if str(c.id) not in covered_clusters)
 
     pending = task_by_status.get("PENDING", 0)
     approved = task_by_status.get("APPROVED", 0)
@@ -207,8 +226,14 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         ("生成提案", f"{n_proposal} 个"),
         ("待批", f"{pending} 个"),
         ("已执行", f"{auto} 个"),
-        ("**积压**", f"{backlog} 个 P0/P1 还没出提案"
-                     + (f"｜{pending} 个待批" if pending else "")),
+        # "积压"这个词要慎用。系统里只允许两种"等"：
+        #   等人批（有主）、等窗口到期（有主）。
+        # "P0/P1 没有任何去向"是第三类：**没有主** —— 那是异常，不是常态。
+        # 现在口径是：有提案行（含 SKIPPED）就算"有去向"，
+        # 所以这里非 0 = 提案器漏了整个簇，是要修的。
+        ("**P0/P1 无去向**", ("✅ 无（每个都有提案或跳过记录）" if backlog == 0
+                            else f"⚠️ {backlog} 个（异常：提案器漏掉了整个簇）")),
+        ("等人批", f"{pending} 个（有主：运营）"),
         ("批准率", f"{_pct(approved, decided_n)}（批 {approved}／拒 {rejected}）"
                    if decided_n else "还没有人批过"),
         ("响应时长", f"平均 {avg_hours:.1f} 小时（提案→批准）" if avg_hours else "—"),
@@ -216,7 +241,9 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         ("L2/L3 占比", _pct(proposal_by_risk.get("L2", 0) + proposal_by_risk.get("L3", 0),
                             n_proposal)),
         ("**等待观察窗口**", f"{n_waiting} 条（动作已做，14 天后才看得出效果）"),
-        ("死信积压", f"{n_dead} 条待人工核对"),
+        # 不用"积压"：死信是【有主】的（等人工核对），不是没人管。
+        # 用"待核对"而不是"积压"，是在提示"这是别人的活儿，不是系统漏了"。
+        ("死信待核对", f"{n_dead} 条（有主：人工）"),
         ("口径", "簇/异常/提案只看【最近一次运行】；商品/评价是存量"),
     ]
 

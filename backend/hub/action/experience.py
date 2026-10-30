@@ -130,13 +130,13 @@ def history_for(topic: str) -> list[ToolRecord]:
         for p in proposals:
             args = p.args if isinstance(p.args, dict) else {}
 
-            # 优先读提案自己记的 topic（生成时就知道，最可靠）
+            # 优先读提案自己的 topic 列（生成时就知道，最可靠）
             #
             # 为什么不能只靠 cluster_id 反推：
             #   `listing.update_desc` 的参数是 spu_id，**没有 cluster_id**，
             #   反推不出来 → 改描述的历史结论会整类丢失。
             #   （实测踩过：4 个历史动作全是 spu 级，经验回灌一个都看不见。）
-            own_topic = args.get("topic")
+            own_topic = p.topic
             if own_topic:
                 if own_topic != topic:
                     continue

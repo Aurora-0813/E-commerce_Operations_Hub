@@ -111,8 +111,10 @@ def compute(data: DidInput, confounds: list[str] | None = None,
     c_ok = _eligible(data.control)
     did = _did_of(t_ok, c_ok)
 
-    t_keys = list(t_ok)
-    c_keys = list(c_ok)
+    # 排序再抽样：dict 的遍历顺序取决于 SQL 返回顺序（没 order_by 时不保证），
+    # 不排的话 bootstrap 抽到的商品序列每次不同 → CI 端点会漂（结论不变，但数字不该抖）。
+    t_keys = sorted(t_ok)
+    c_keys = sorted(c_ok)
     n_reviews = (t_all["n_before"] + t_all["n_after"]
                  + c_all["n_before"] + c_all["n_after"])
 

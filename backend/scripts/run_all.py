@@ -121,12 +121,20 @@ def summary() -> None:
 
 
 def _pyflakes_undefined() -> list[str] | None:
-    """用 pyflakes 查"未定义的名字"。返回问题列表；没装 pyflakes 返回 None。
+    """用 pyflakes 查【致命的"名字"问题】。返回问题列表；没装 pyflakes 返回 None。
 
-    **只让"未定义名字"挡路**，其他（未使用的 import、f-string 没占位符）
+    **只让"名字类"问题挡路**，其他（未使用的 import、f-string 没占位符）
     只当提示 —— 那些是风格问题，不该阻塞整条全链。
+
+    ⚠️ 不只过滤 "undefined name"：还有一类同样致命但写法不同 ——
+        "local variable 'sys' referenced before assignment"
+        （函数里某处 `import sys` 会让 sys 变成局部变量，函数开头用它就崩）。
+        实测踩过：只过滤 undefined name 就漏掉了这个，结果 CLI 一启动就崩。
     """
     import subprocess
+    FATAL = ("undefined name",
+             "referenced before assignment",
+             "defined in enclosing scope")
     try:
         r = subprocess.run(
             [sys.executable, "-m", "pyflakes",
@@ -138,7 +146,7 @@ def _pyflakes_undefined() -> list[str] | None:
     if r.returncode < 0:            # 进程被杀之类的，不当作检查结果
         return None
     return [ln for ln in (r.stdout or "").splitlines()
-            if "undefined name" in ln]
+            if any(k in ln for k in FATAL)]
 
 
 def main() -> None:

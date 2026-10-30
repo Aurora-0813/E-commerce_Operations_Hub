@@ -69,7 +69,7 @@ REPLY_REMEDY = {
 }
 
 MAX_REVIEWS_PER_DRAFT = 20      # 一次回复最多覆盖多少条评价
-MAX_PROPOSALS = 6               # 一次最多出几个提案（运营看不过来更多）
+MAX_PROPOSALS = 6               # **P2/P3** 一次最多出几个（P0/P1 不受此限，见 propose()）
 
 REPLY_PROMPT = """我们要回复的是**同一类差评**（共 {n} 条），主要问题是：{label}
 
@@ -253,6 +253,53 @@ def _apply_advice(topic: str, default_tool: str, adv) -> tuple[str, str | None, 
     return tool, floor, note
 
 
+def _schema_error(spec, args: dict) -> str:
+    """按工具的 args_schema 校验参数。返回错误信息，合法则返回空串。
+
+    在**提案这一层**校验，而不是等网关拒：
+        网关必须校验（它是最后一道闸），但那时提案已经进库了，
+        留下一条注定被拒的记录。这里先拦住，把问题变成 SKIPPED + 原因。
+    """
+    try:
+        schema = getattr(spec, "args_schema", None)
+        if not schema:
+            return ""
+        from jsonschema import validate       # 项目里 pydantic 已带 jsonschema 依赖
+        validate(instance=args, schema=schema)
+        return ""
+    except Exception as e:                    # noqa: BLE001
+        return str(e).splitlines()[0][:80]
+
+
+def _record_skipped(cluster, run_id, trace_id: str, reason: str) -> None:
+    """把"这个簇被跳过了"落盘成一条 status=SKIPPED 的提案记录。
+
+    **为什么"不做的决定"也要落盘**：
+        系统里最糟的状态不是"没做"，是"不知道为什么没做"。
+        只打印一句日志的话，下游（hub today / status）只能看到
+        "这个 P0 没有提案"，却分不清是被上限挡住、工具没注册、还是去重撞了。
+
+        落盘之后，"每个高优簇都有明确的去向"：
+            status=PROPOSED  → 有提案（可能在等人批）
+            status=SKIPPED   → 有结论：不做，原因是 X
+            什么都没有       → **这才是异常**
+
+    注意：`evidence_refs` 里写 `issue_cluster`，这样下游不用猜
+        （`listing.update_desc` 的 args 是 spu_id，从 args 反推不出簇）。
+    """
+    from hub.persistence.models import ActionProposal as _AP
+    with get_session() as s:
+        s.add(_AP(
+            run_id=run_id, trace_id=trace_id,
+            tool_name="(skipped)", tool_version="-",
+            args={}, risk_level="L0",
+            evidence_refs=[{"issue_cluster": str(cluster.id)}],
+            rationale=f"跳过「{cluster.label}」：{reason}",
+            dry_run=True, status="SKIPPED",
+        ))
+        s.commit()
+
+
 @traced("m5.propose")
 def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> ProposalStats:
     """给 P0/P1 的簇生成提案（写库，不执行）。"""
@@ -292,7 +339,35 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
 
     seen: set[tuple] = set()     # (工具, 目标) 去重：同一个东西只出一个提案
 
-    for cluster in clusters[:max_proposals]:
+    # 选哪些簇出提案：**P0/P1 全出，P2/P3 最多 max_proposals 个**。
+    #
+    # 为什么改成这样（原来是 `clusters[:max_proposals]`）：
+    #   原来的上限是"总共最多 6 个"，于是 P0/P1 有 7 个时，
+    #   剩下的 1 个【没人管】——那才是真正的"积压"。
+    #   `hub status` 里那行"积压 1 个 P0/P1 还没出提案"就是它。
+    #
+    #   原则：系统里只允许两种"等"——等人批（有主）、等窗口到期（有主）。
+    #   "P0/P1 没出提案"是第三类：**没有主**。这类状态不该存在。
+    #
+    #   上限仍然保留，但它只约束【低优先级】：P2/P3 本来就是"可以晚点做"的，
+    #   而 P0/P1 晚一天就是一天的钱。
+    urgent = [c for c in clusters if (c.priority_tier or "") in ("P0", "P1")]
+    rest = [c for c in clusters if (c.priority_tier or "") not in ("P0", "P1")]
+    selected = urgent + rest[:max_proposals]
+
+    for cluster in selected:
+        # 被跳过的簇也要**落盘一条记录**（status=SKIPPED + 原因）。
+        #
+        # 为什么：系统里最糟的状态不是"没做"，是"**不知道为什么没做**"。
+        #   原来的实现只是 `stats.skipped.append(...)` —— 打印一次就没了，
+        #   于是下游（hub today / status）只能看到"这个 P0 没有提案"，
+        #   分不清是"被上限挡住了"、"工具没注册"、还是"去重撞了"。
+        #   实测踩过：3 个 P0/P1 被报"没有提案"，其中 2 个其实有提案，
+        #   只是提案的 args 用 spu_id、没有 cluster_id —— 关系丢了。
+        #
+        #   修法：① 关系用 evidence_refs 落盘（那里一直写着 issue_cluster）；
+        #        ② 跳过的也写一行，带上原因。
+        #   这样"每一个高优簇都有明确的去向"，不再有"没有主"的状态。
         with get_session() as s:
             # 代表评价（距质心最近）排前面：它们是"最能代表这个簇"的评价。
             # 不排序的话 members[0] 是随机的，可能出现"簇叫掉色、回复却说线头"。
@@ -303,6 +378,7 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
                 .limit(MAX_REVIEWS_PER_DRAFT * 2)
             ).all()
         if not members:
+            _record_skipped(cluster, run_id, trace_id, "没有成员评价")
             stats.skipped.append(f"{cluster.label}（没有成员）")
             continue
 
@@ -319,6 +395,8 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
 
         spec = get_spec(tool_name)
         if spec is None:
+            _record_skipped(cluster, run_id, trace_id,
+                            f"工具未注册：{tool_name}")
             stats.skipped.append(f"{cluster.label}（工具未注册：{tool_name}）")
             continue
 
@@ -328,6 +406,8 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
                   else _primary_spu(list(members), cluster))
         sig = (tool_name, target)
         if sig in seen:
+            _record_skipped(cluster, run_id, trace_id,
+                            f"和前面的提案目标相同（{tool_name} → {target}）")
             stats.skipped.append(f"{cluster.label}（和前面提案目标相同：{target}）")
             continue
         seen.add(sig)
@@ -335,19 +415,25 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
         try:
             args = _build_args(tool_name, cluster, list(members), topic, llm)
         except Exception as e:                  # noqa: BLE001
+            _record_skipped(cluster, run_id, trace_id, f"构造参数失败：{e}")
             stats.skipped.append(f"{cluster.label}（构造参数失败：{e}）")
             continue
 
-        # ★ 把 topic 写进 args：这是"我针对哪一类问题生成"的真实元数据。
+        # ★ 提交前先按工具 schema 校验一次
         #
-        #   为什么要落盘：下游的经验回灌（hub/action/experience.py）要按
-        #   (topic, 工具) 统计历史战绩。而 listing.update_desc 这类动作的参数是
-        #   spu_id、**没有 cluster_id**，下游没法从簇反推 topic ——
-        #   结果就是"生成时明明知道 topic，下游却看不见"。
-        #   实测踩过：改描述的历史结论对经验回灌完全不可见。
-        args["topic"] = topic
+        # 为什么：网关会校验（而且拦住了我们一次），但那时提案已经写进库了，
+        # 留下一条"注定被拒"的记录。在提案这一层先校验，就能把问题变成
+        # SKIPPED + 原因，而不是每条提案都去网关撞一次墙。
+        # 实测踩过：往 args 里塞了 `topic`（schema 里没有）→ 7 个提案全被拒。
+        bad = _schema_error(spec, args)
+        if bad:
+            _record_skipped(cluster, run_id, trace_id, f"参数不符合工具 schema：{bad}")
+            stats.skipped.append(f"{cluster.label}（参数不合法：{bad}）")
+            continue
 
-        # 依据：这个簇本身
+        # ★ topic 不能放进 args：它不属于工具参数，属于提案的属性。
+        #   实测踩过：塞进 args["topic"] 后 7 个提案全被网关拒（PARAM_INVALID），
+        #   因为 args_schema 里没有这个字段。网关是对的，错的是我们。
         evidence = {"issue_cluster": str(cluster.id)}
 
         # 理由 = 「问题名」+ LLM 写的一句判断
@@ -378,6 +464,7 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
                 # ⚠️ 关键：这个值必须被【传给网关】（cli.cmd_propose 里 risk_floor=p.risk_level），
                 #    否则就是"库里写着 L2、实际却自动执行了"——看起来降级了，其实没降。
                 risk_level=risk_floor or spec.risk_level,
+                topic=topic,
                 # 实际生效等级 = max(提案等级, 工具声明)，网关侧再取一次 max
                 evidence_refs=[evidence],       # 只放依据
                 rationale=rationale,            # 理由单独一列
