@@ -435,7 +435,8 @@ class HitlTask(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
                                      server_default=text("gen_random_uuid()"))
-    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("action_proposal.id"), nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("action_proposal.id", ondelete="CASCADE"), nullable=False)
     trace_id: Mapped[str] = mapped_column(Text, nullable=False)
     assignee: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'PENDING'"))
@@ -629,6 +630,15 @@ class PromoCalendar(Base):
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     platforms: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False,
                                                  server_default=text("'{}'"))
+    # 促销覆盖的商品（空数组 = 全店大促）
+    #
+    # ⚠️ 这一列决定了"大促算不算混杂"，是 M9 判结论的关键：
+    #     全店大促（空数组）→ 处理组和对照组都在里面 → DID 能减掉 → **不是混杂**
+    #     定向促销（有商品）→ 只有处理组的商品在做活动 → 对照组减不掉 → **是混杂**
+    #   真实业务里"主推款才做大促"非常常见，所以这个区分必须有。
+    #   没有这一列的话，一个全店大促会让所有动作都被判成"撞大促"，M9 直接全废。
+    spu_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False,
+                                               server_default=text("'{}'"))
 
 
 # ==================== 六、效果复盘（M9） ====================
@@ -639,7 +649,8 @@ class ActionOutcome(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
                                      server_default=text("gen_random_uuid()"))
-    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("action_proposal.id"), nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("action_proposal.id", ondelete="CASCADE"), nullable=False)
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     treat_canonical_spu_id: Mapped[str] = mapped_column(Text, nullable=False)
     control_spu_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False,
@@ -659,7 +670,15 @@ class ActionOutcome(Base):
                                                  server_default=text("now()"))
 
     __table_args__ = (
-        UniqueConstraint("proposal_id", name="uq_outcome_proposal"),
+        # 一个动作可能影响**多个商品**（回复一个簇 → 覆盖几十个商品），
+        # 所以唯一性应该是"同一提案下，同一商品只有一条复盘"，
+        # 而不是"一个提案只有一条"——原来那个约束写的时候，
+        # 提案还都是"改一个商品的价格"，没考虑到簇级动作。
+        #
+        # 为什么坚持"一个商品一条"：DID 的单位是【处理商品 vs 对照商品】的配对，
+        # 一条记录对多个商品就没法配对，也回答不了"对哪个商品更有效"。
+        UniqueConstraint("proposal_id", "treat_canonical_spu_id",
+                         name="uq_outcome_proposal_spu"),
         CheckConstraint("conclusion IN ('POSITIVE','NEGATIVE','NEUTRAL','INCONCLUSIVE')",
                         name="ck_outcome_conclusion"),
         Index("idx_outcome_due", "status", "observe_end"),
@@ -674,7 +693,8 @@ class ReviewReplyDraft(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
                                      server_default=text("gen_random_uuid()"))
-    cluster_id: Mapped[UUID | None] = mapped_column(ForeignKey("issue_cluster.id"), nullable=True)
+    cluster_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("issue_cluster.id", ondelete="CASCADE"), nullable=True)
     review_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PGUUID(as_uuid=True)), nullable=False)
     template_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)

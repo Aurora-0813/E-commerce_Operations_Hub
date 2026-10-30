@@ -156,7 +156,11 @@ def collect(trace_id: str | None = None) -> list[tuple[str, list[tuple[str, str]
     cost = [
         ("token（入/出）", f"{total_in:,} / {total_out:,}"),
         ("输入输出比", f"{total_in / total_out:.1f} : 1" if total_out else "—"),
-        ("每步 token（含子调用）",
+        # ⚠️ 这一行的数字**不能相加**，不是分项汇总：
+        #    口径是"该步含子调用的总量"，m2_multimodal 已经把 vision.extract 的
+        #    79,852 token 算进去了。按"父 + 子"直接相加会让 vision 部分重复计数。
+        #    它回答的是"每一步占了多少"，不是"总共花了多少"（总数看上面那行）。
+        ("每步 token（含子调用，不可相加）",
          "｜".join(f"{n.replace('.', '_')} {i + o:,}" for n, _, i, o in steps[:4]) or "—"),
         ("Vision 调用", f"{vision_n} 次"),
         ("每图 token", f"{vision_tok // vision_n:,}" if vision_n else "—"),

@@ -5,14 +5,17 @@
 现在改这个文件会让**全链所有数字作废**（随机序列会穿透到 gold / images / DQE / M2 / M3）。
 所以下面 4 件事要**一次性做完**，做完就冻结，M9~M10 不再动数据：
 
-  [ ] 1. 销量覆盖全部商品（现在 `write_sales` 里是 `PRODUCTS[:6]`，
-         只覆盖 6/25 个商品，导致 M4 的 `reach` 退化成"评论数占比"）
-  [ ] 2. 时间结构：造一个商品的"问题爆发 → 干预 → 改善"
-         第 1~4 周差评率高 / 转化低；第 5 周执行动作；第 5~8 周恢复
-         （M9 效果复盘做 DID 必须有这个 before/after）
-  [ ] 3. 干预记录（哪个商品、哪一周、做了什么动作）→ M6/M9 的 treatment
+  [x] 1. 销量覆盖全部商品（原来 `write_sales` 只覆盖 6/25 个商品，
+         导致 M4 的 `reach` 退化成"评论数占比"）→ 已改成 PRODUCTS 全量
+  [x] 2. 时间结构：造"问题爆发 → 干预 → 改善"
+         干预点 2026-09-20（在评价 09-01~10-22 和销售 07-25~10-22 的交集内），
+         前窗口 09-06~09-19、后窗口 09-21~10-04 都装得下
+  [x] 3. 干预记录：6 个商品（3 有效 / 2 无效 / 1 撞大促）
+         → 写出 `historical_interventions.csv`，由 `scripts/seed_history.py` 入库
   [ ] 4. 每个生成器改用 `random.Random(SEED + 偏移)`，隔离随机源
-         → 以后改一个生成器不会牵连其他
+         （**仍然欠着**：现在所有生成器共用一个全局 random，
+           改一处会牵连全部输出。但我们已经要重生成一次，且以后不再动数据，
+           所以优先级降下来了。真要改生成器时必须先做这条。）
 
 为什么触发条件是 M9 而不是 M6：
   M5/M6 执行动作改的是 `platform_product_state`，不需要新数据；
@@ -20,6 +23,8 @@
   另外还有个更根本的问题：动作发生在"现在"，mock 数据是固定历史，
   动作之后没有数据 → 没有 after 可测。方案（预埋剧本 / 事后模拟器 / 推迟 M9）
   见 docs/工程规范.md §1。
+  **最终选择「预埋剧本」**：在历史里埋 6 个干预 + 已知答案（ground truth），
+  M9 的 DID 能不能挖出来，是可验证的。
 
 生成仿真森马店铺（男女装混合）的电商导出数据。
 
@@ -43,14 +48,22 @@
 """
 import csv
 import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from openpyxl import Workbook
 
 # ==================== 可调参数 ====================
 SEED = 42
-N_REVIEWS = 2000          # 每平台评价数（淘宝 + 京东各 2000）
+N_REVIEWS = 3500          # 每平台评价数（淘宝 + 京东各 3500）
+#
+# 为什么从 2000 提到 3500（2026-10 实测）：
+#   M9 做 DID 需要【每商品每窗口】足够多的评价。
+#   2000 条时：DQE 洗掉 40% 刷单后，单个商品每 14 天窗口只剩 6~20 条，
+#   `3/12` 这种比率的标准误 ±12pp——DID 的置信区间宽到 ±13pp，
+#   真实有效的 G1（降 45%）都判不出显著。
+#   3500 条时：每商品每窗口约 23 条，DID 标准误 7.0pp → 5.3pp。
+#   代价：差评 559 → 约 980，M3 从 264s → 约 460s。
 SALES_DAYS = 90           # 销售数据天数
 GOLD_SAMPLE = 500         # 标注集抽样条数
 NOISE_RATIO = 0.40        # 水军/灌水/广告占比（其余为真实评价）
@@ -149,15 +162,117 @@ PRICE_DIVERGENT_TITLES = {
 
 # 问题商品：差评率显著更高（模拟"质量差 → 差评多"）
 # 其中 3 个同时有价差 → 构成"贵且差"的业务闭环
+#
+# ⚠️ 为什么要 8 个（而不是当初的 3 个）：
+#   M9 的 DID 要检测"降 45%"，需要足够的差评样本。
+#   只有 3 个问题商品时，它们会挤在同一两个组里，其余组全是"普通商品"（差评率 9%）
+#   → ×0.55 后差值只有 4 个百分点，标准误 2.8pp → 1.4σ → **测不出来**，
+#     那些组会被判"不显著"，POSITIVE 的演示直接缺一条。
+#   扩到 8 个（每组 2 个）后，每组约 35 条差评 → 差值 7.4pp / 标准误 3.5pp → 2.1σ ✅
 PROBLEM_TITLES = {
-    "纯羊毛毛衣圆领",
-    "轻薄羽绒服短款",
-    "风衣中长款女",
+    # ── 原有 3 个（同时有跨平台价差，"贵且差"的故事）──
+    "纯羊毛毛衣圆领",     # G2
+    "轻薄羽绒服短款",     # G2
+    "风衣中长款女",       # G3
+    # ── 新增 5 个（让每个实验组都有 2 个问题商品）──
+    "纯棉圆领T恤基础款",  # G1
+    "直筒牛仔裤男士宽松",   # G1（注意是"男**士**"，不是"男"）
+    "雪纺连衣裙碎花",     # G3
+    "棉麻连衣裙宽松",     # G4
+    "阔腿裤女垂感",       # G4
+    # ── 对照组也放 2 个 ──
+    # 为什么：对照组的基期差评率必须和实验组接近，否则 DID 的
+    # "平行趋势"假设更难成立（0.09 vs 0.16 差太多了）。
+    "男士平角内裤",       # CONTROL
+    "秋衣秋裤套装加厚",   # CONTROL
 }
 
 # 非水军评价里"问题评价"的比例
 PROBLEM_RATIO_NORMAL = 0.15    # 普通商品：15%（约等于全量的 9%）
 PROBLEM_RATIO_BAD = 0.45       # 问题商品：45%（约等于全量的 27%）
+
+
+# ==================== M9 需要的历史干预（预埋剧本）====================
+#
+# **这是 M9 效果复盘的 ground truth**：数据里埋了 4 组"两个月前做过的干预"，
+# 我们知道每组真实效果，M9 的 DID 能不能挖出来是可验证的。
+#
+# 为什么干预点是 2026-09-20：
+#   评价覆盖 09-01~10-22、销售覆盖 07-25~10-22，
+#   前窗口 09-06~09-19 / 后窗口 09-21~10-04 **都落在数据范围内**。
+#
+# ⚠️ 为什么是"4 组 × 5 个标题"而不是"6 个干预 × 1 个商品"：
+#   统计上测不出来。每商品每 14 天窗口只有约 21 条评价、6 条差评，
+#   差值标准误约 13 个百分点，而"降 35%"只值 10 个百分点 → 必然判"不显著"。
+#   按【组】聚合后：5 标题 = 10 个平台 SKU → 每窗口约 215 条评价、58 条差评
+#   → 标准误约 4 个百分点 → 能测出来。
+#
+#   顺带说：**加 30 天历史解决不了这个问题**——窗口固定 14 天，
+#   加历史只延长总范围，不增加"窗口内的密度"。
+INTERVENTION_DATE = date(2026, 9, 20)
+GROUP_SIZE = 5          # 每组几个【标题】（1 个标题 = 淘宝 1 个 + 京东 1 个 SKU）
+
+# (组名, 差评率乘数, 动作, 备注, 是否撞大促)
+GROUP_EFFECTS = [
+    ("G1", 0.55, "listing.update_desc", "有效：改描述，差评率降 45%", False),
+    ("G2", 0.97, "review.draft_reply",  "无效：回复差评，只降 3%", False),
+    ("G3", 1.35, "review.draft_reply",  "变差：回复话术不佳，差评率升 35%", False),
+    ("G4", 0.55, "listing.update_desc", "撞大促：看着降 45%，其实是大促", True),
+]
+# 第 5 组（标题下标 20~24）是对照组，不做任何干预
+
+TITLES = [p[1] for p in PRODUCTS]
+
+# 自检：PROBLEM_TITLES 里每个标题都必须在 PRODUCTS 里真实存在。
+#
+# 为什么要有这道检查：这些标题是**手写字符串**（按商品清单抄的），
+# 抄漏一个字（"直筒牛仔裤男宽松" vs "直筒牛仔裤男**士**宽松"）不会报错，
+# 只会让那个商品【悄悄地不再是问题商品】→ 分组基线悄悄变了 → M9 的结论跟着错。
+# 实测踩过：G1 的问题商品数应该是 2，实际是 1，跑完 CSV 才发现。
+_bad = [t for t in PROBLEM_TITLES if t not in TITLES]
+if _bad:
+    raise SystemExit(
+        f"❌ PROBLEM_TITLES 里有 {len(_bad)} 个标题在 PRODUCTS 里不存在（抄错了？）：\n"
+        + "\n".join(f"    {t!r}" for t in _bad)
+    )
+
+
+def _group_of(title: str) -> int:
+    """某个标题属于第几组。越界（找不到 / 超出）→ 返回 99（= 对照组）。"""
+    try:
+        idx = TITLES.index(title) // GROUP_SIZE
+    except ValueError:
+        return 99
+    return idx if idx < len(GROUP_EFFECTS) else 99
+
+
+# 撞大促：大促期间买家因为折扣更满意 → 差评率自然下降、销量翻倍
+# **这是"看起来有效、其实是别的原因"的典型场景**——
+# DID 分不出来，只有 promo_calendar 能分出来 → M9 必须查日历
+PROMO = {
+    "name": "秋季保暖专场",
+    "start": date(2026, 9, 21),
+    "end": date(2026, 10, 4),
+    "gmv_boost": 1.8,
+    "bad_ratio_mult": 0.70,
+}
+
+
+def _intervention_effect(title: str, t: datetime) -> float:
+    """某个商品在某天的【差评率乘数】（干预后生效）。"""
+    gi = _group_of(title)
+    if gi >= len(GROUP_EFFECTS) or t.date() < INTERVENTION_DATE:
+        return 1.0
+    return GROUP_EFFECTS[gi][1]
+
+
+def _promo_effect(title: str, t: datetime) -> float:
+    """大促期间的差评率乘数（只作用于 PROMO 那一组）。"""
+    gi = _group_of(title)
+    if gi < len(GROUP_EFFECTS) and GROUP_EFFECTS[gi][4] \
+            and PROMO["start"] <= t.date() <= PROMO["end"]:
+        return PROMO["bad_ratio_mult"]
+    return 1.0
 
 
 POSITIVE = [
@@ -364,16 +479,20 @@ def pick_topic(problem_ratio: float = PROBLEM_RATIO_NORMAL) -> str:
 
 
 def gen_reviews(platform: str, products: list[dict]) -> list[dict]:
+    # 随机源隔离（见 write_gold 里的说明）：淘宝/京东各一条独立随机流
+    random.seed(SEED + 1 + (0 if platform == "taobao" else 1))
     start = datetime(2026, 9, 1)
     end = datetime(2026, 10, 22)
     reviews = []
     for i in range(N_REVIEWS):
         p = random.choice(products)
+        t = random_time(start, end)
         # 问题商品用更高的"问题评价"比例（模拟"质量差 → 差评多"）
-        ratio = PROBLEM_RATIO_BAD if p["title"] in PROBLEM_TITLES else PROBLEM_RATIO_NORMAL
+        base = PROBLEM_RATIO_BAD if p["title"] in PROBLEM_TITLES else PROBLEM_RATIO_NORMAL
+        # ★ M9 的时间结构：干预日之后该商品的差评率下降；大促期间也会降
+        ratio = base * _intervention_effect(p["title"], t) * _promo_effect(p["title"], t)
         topic = pick_topic(ratio)
         attr = make_attr(p)
-        t = random_time(start, end)
         row = {"id": f"{'TB' if platform=='taobao' else 'JD'}{i:08d}",
                "product": p, "topic": topic, "time": t, "attr": attr}
 
@@ -386,7 +505,19 @@ def gen_reviews(platform: str, products: list[dict]) -> list[dict]:
         else:
             content = fill(p, p["attrs"], random.choice(NEGATIVE[topic]))
 
+        # ★ 多标签 ground truth：约 20% 的差评【同时抱怨两个问题】。
+        #   真实差评常常一句话说两件事（"线头多，尺码也偏小"），
+        #   而模型能不能识别出第二个问题，需要标注才能评——没有这一列，
+        #   我们只能看到"多标签 80 条"，却不知道多了还是少了。
+        secondary = None
+        if topic in NEGATIVE and random.random() < 0.20:
+            other = random.choice([t for t in NEGATIVE if t != topic])
+            content = content.rstrip("。") + "，" + fill(
+                p, p["attrs"], random.choice(NEGATIVE[other]))
+            secondary = other
+
         row["content"] = content
+        row["secondary"] = secondary
         row["nick"] = nick(platform, i)
         row["has_image"] = topic in ("quality", "desc_mismatch") and random.random() < 0.5
         row["append"] = platform == "jd" and random.random() < 0.1
@@ -502,11 +633,11 @@ def write_products(taobao_path: Path, jd_path: Path):
 
 def write_sales(taobao_path: Path, jd_path: Path):
     """销售数据：淘宝(生意参谋) / 京东(商智) 各自导出，90 天时间序列，列名不同。"""
+    random.seed(SEED + 2)          # 随机源隔离
     tb_header = ["日期", "商品ID", "商品名称", "支付金额", "支付买家数", "访客数", "退款金额", "退款笔数"]
     jd_header = ["日期", "商品编号", "商品名称", "成交金额", "成交件数", "访客数", "退款金额", "退款件数"]
-    # TODO(M6 前)：改成全部商品（现在只有前 6 个有销售数据，
-    # 导致 M4 的 reach 因子退化 —— 见文件顶部 TODO 清单第 1 条）
-    targets = PRODUCTS[:6]
+    # 销量覆盖【全部商品】（原来只有前 6 个，导致 M4 的 reach 因子退化成"评论数占比"）
+    targets = PRODUCTS
     start = datetime(2026, 7, 25)
     wb_tb, wb_jd = Workbook(), Workbook()
     ws_tb, ws_jd = wb_tb.active, wb_jd.active
@@ -518,12 +649,18 @@ def write_sales(taobao_path: Path, jd_path: Path):
         day = start + timedelta(days=d)
         weekday = day.weekday()
         for idx, (brand, title, cat, tb_price, jd_price, attrs) in enumerate(targets):
+            # 撞大促的那一组：大促期间销量翻倍（和评价那边的差评率下降配套）
+            promo = (PROMO["gmv_boost"]
+                     if _group_of(title) < len(GROUP_EFFECTS)
+                     and GROUP_EFFECTS[_group_of(title)][4]
+                     and PROMO["start"] <= day.date() <= PROMO["end"]
+                     else 1.0)
             if tb_price is not None:
                 base = random.randint(10000, 30000)
                 weekend_boost = 1.3 if weekday >= 5 else 1.0
                 trend = 1.0 - d * 0.002
                 noise = random.uniform(0.85, 1.15)
-                gmv = int(base * weekend_boost * trend * noise)
+                gmv = int(base * weekend_boost * trend * noise * promo)
                 orders = int(gmv / random.randint(180, 240))
                 uv = int(orders * random.randint(28, 40))
                 refund = int(gmv * random.uniform(0.01, 0.03))
@@ -535,7 +672,7 @@ def write_sales(taobao_path: Path, jd_path: Path):
                 weekend_boost = 1.3 if weekday >= 5 else 1.0
                 trend = 1.0 - d * 0.0025
                 noise = random.uniform(0.85, 1.15)
-                gmv = int(base * weekend_boost * trend * noise)
+                gmv = int(base * weekend_boost * trend * noise * promo)
                 orders = int(gmv / random.randint(180, 240))
                 uv = int(orders * random.randint(28, 40))
                 refund = int(gmv * random.uniform(0.01, 0.03))
@@ -547,7 +684,13 @@ def write_sales(taobao_path: Path, jd_path: Path):
 
 
 def write_gold(path: Path, reviews: list[dict]):
-    header = ["记录ID", "平台", "是否水军", "主题分类"]
+    # 随机源隔离：每个生成器入口用【自己的种子】重置全局 RNG。
+    # 为什么：所有生成器共用一个全局 random 时，改 `gen_reviews` 会连带改变
+    #        `write_sales` / `write_gold` 的输出——"只想改一处"变成"全都变"。
+    #        在每个入口 reseed，就等效于"每个生成器一条独立随机流"。
+    random.seed(SEED + 4)
+
+    header = ["记录ID", "平台", "是否水军", "主题分类", "次要主题"]
     topic_map = {"positive": "positive", "neutral": "other", "noise": "",
                  "quality": "quality", "size": "size", "logistics": "logistics",
                  "service": "service", "desc_mismatch": "desc_mismatch", "misship": "misship"}
@@ -564,7 +707,10 @@ def write_gold(path: Path, reviews: list[dict]):
         for r in picked:
             plat = "淘宝" if r["id"].startswith("TB") else "京东"
             is_spam = 1 if r["topic"] == "noise" else 0
-            w.writerow([r["id"], plat, is_spam, topic_map[r["topic"]]])
+            # 次要主题：模型识别出 2 个问题 vs 人工标注只有 1 个，是【多标签漏判】；
+            # 反过来是【多标签过判】。没有这一列，多标签指标就无从验证。
+            w.writerow([r["id"], plat, is_spam, topic_map[r["topic"]],
+                        topic_map.get(r.get("secondary") or "", "")])
 
 
 def _make_image(scene: str):
@@ -612,6 +758,8 @@ def write_images(img_dir: Path, reviews: list[dict], platform: str,
 
     场景分布（仅合成图时）：60% 正常 / 25% 色差 / 15% 破损。
     """
+    # 随机源隔离：两个平台各一条独立随机流（本函数会被调用两次）
+    random.seed(SEED + 3 + (0 if platform == "taobao" else 1))
     import shutil
 
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -650,6 +798,52 @@ def write_images_zip(img_dir: Path, zip_path: Path) -> None:
                 zf.write(f, f.name)
 
 
+def write_history(path: Path) -> None:
+    """写出历史干预清单（M9 的 ground truth）。
+
+    **这是 mock 的"答案"**：
+        M9 的 DID 应该判出 G1=POSITIVE、G2=不显著、G3=NEGATIVE、G4=撞大促。
+        判不出来或判反了，就是 M9 的 bug。
+
+    格式：一组一行（因为 DID 的统计单位是【组】，不是单个商品）。
+    这张表**不是平台导出**，是我们自己的实验记录，所以直接 CSV。
+    """
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["组", "商品标题", "问题商品数", "基期差评率", "干预后差评率",
+                    "干预日", "动作", "差评率乘数", "备注", "撞大促"])
+
+        def _bad_rate(titles: list[str], factor: float) -> float:
+            """估这一组的差评率（只看非水军评价）。
+
+            为什么要把它写进 CSV：
+                这是 M9 的**预期答案**。M9 算出 POSITIVE 之后，
+                人应该能一眼对照"它算出的差评率降幅，和我埋的 45% 对得上吗"。
+                否则 ground truth 只是一张"看起来很像"的表，验不了。
+            """
+            if not titles:
+                return 0.0
+            ratio = sum(PROBLEM_RATIO_BAD if t in PROBLEM_TITLES else PROBLEM_RATIO_NORMAL
+                        for t in titles) / len(titles)
+            return round(ratio * (1 - NOISE_RATIO) * factor, 4)
+
+        for gi, (gname, factor, action, note, promo) in enumerate(GROUP_EFFECTS):
+            titles = TITLES[gi * GROUP_SIZE:(gi + 1) * GROUP_SIZE]
+            n_prob = sum(1 for t in titles if t in PROBLEM_TITLES)
+            base = _bad_rate(titles, 1.0)
+            after = base * factor * (PROMO["bad_ratio_mult"] if promo else 1.0)
+            w.writerow([gname, ";".join(titles), n_prob, base, round(after, 4),
+                        INTERVENTION_DATE.isoformat(), action, factor, note,
+                        "是" if promo else "否"])
+
+        control = TITLES[len(GROUP_EFFECTS) * GROUP_SIZE:]
+        n_prob = sum(1 for t in control if t in PROBLEM_TITLES)
+        w.writerow(["CONTROL", ";".join(control), n_prob,
+                    _bad_rate(control, 1.0), _bad_rate(control, 1.0),
+                    "", "", 1.0, "对照组：不做任何干预", "否"])
+    print(f"  历史干预 -> {path.name}（{len(GROUP_EFFECTS)} 组 + 1 个对照组）")
+
+
 def main():
     random.seed(SEED)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -668,6 +862,7 @@ def main():
     write_products(DATA_DIR / "taobao_product_202610.xlsx", DATA_DIR / "jd_product_202610.xlsx")
     write_sales(DATA_DIR / "taobao_sales_202610.xlsx", DATA_DIR / "jd_sales_202610.xlsx")
     write_gold(DATA_DIR / "gold_labels.csv", tb + jd)
+    write_history(DATA_DIR / "historical_interventions.csv")
 
     # 图片包（模拟"商家上传的图片包"）：优先用 images_real 里的真实图，目录 + zip 各一份
     n_img = write_images(DATA_DIR / "images", tb, "taobao", DATA_DIR / "images_real")
@@ -682,6 +877,8 @@ def main():
     print(f"  淘宝销售 90 天 -> taobao_sales_202610.xlsx")
     print(f"  京东销售 90 天 -> jd_sales_202610.xlsx")
     print(f"  标注 {GOLD_SAMPLE} 条 -> gold_labels.csv")
+    print(f"  历史干预 {len(GROUP_EFFECTS)} 组 + 1 对照组 -> historical_interventions.csv")
+    print(f"  大促 1 个 -> promo_calendar（由 scripts/seed_history.py 写入库）")
     print(f"  图片包 {n_img} 张 -> images/ + images.zip")
     print(f"  输出目录：{DATA_DIR}")
 

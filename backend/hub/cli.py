@@ -377,6 +377,20 @@ def cmd_health(trace_id: str | None = None) -> None:
     print("      想看单次明细（哪一步慢），用 `hub trace <trace_id>`。")
 
 
+def cmd_retro(dry_run: bool = False, all_: bool = False) -> None:
+    """M9：效果复盘（DID）。
+
+    **只在观察窗口走完之后才算**（默认）；`--all` 连没到期的也算，
+    但那时后窗口还没数据，结论一定是 INCONCLUSIVE —— 只用来调试。
+    """
+    from hub.retro.report import print_report, run
+
+    done, waiting = run(apply=not dry_run, only_due=not all_)
+    print_report(done, waiting)
+    if dry_run:
+        print("\n（--dry-run：结论没有写回数据库）")
+
+
 def cmd_eval(suite: str = "perturbation_v1", strict: bool = False) -> int:
     """M8：跑离线评估套件，返回退出码（0 通过 / 非 0 门禁不过）。"""
     from hub.eval.runner import run
@@ -488,6 +502,13 @@ def main() -> None:
     hp.add_argument("--id", dest="health_trace", default=None,
                     help="指定 trace_id（默认取最近一次全链）")
 
+    # ---- M9 效果复盘 ----
+    rp = sub.add_parser("retro", help="M9：效果复盘（DID，判动作有没有用）")
+    rp.add_argument("--dry-run", action="store_true",
+                    help="只算不写库（先看结论对不对）")
+    rp.add_argument("--all", action="store_true",
+                    help="连没到观察窗口的也算（默认只算到期的）")
+
     # ---- M7 调度 ----
     # 注意：**没有 `--kind` 参数**。现在只允许 kind="full"，
     # 因为 `full` 和 `backfill` 能同时入队（部分唯一索引是"同 kind 唯一"），
@@ -552,6 +573,8 @@ def main() -> None:
         cmd_status()
     elif args.cmd == "health":
         cmd_health(getattr(args, "health_trace", None))
+    elif args.cmd == "retro":
+        cmd_retro(dry_run=args.dry_run, all_=args.all)
     elif args.cmd == "eval":
         # eval 有退出码（CI 用），所以跑完直接 sys.exit
         import sys

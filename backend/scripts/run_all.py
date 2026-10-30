@@ -208,6 +208,20 @@ def main() -> None:
     print(f"{'=' * 64}")
     print_tree(trace_id)
 
+    # 自动刷新数据快照（docs/实测数据.md）
+    #
+    # 为什么放在这里：`docs/工程规范.md` §6 要求"精确数字只有一个来源"。
+    #   如果快照要人工记得跑，那它迟早会过期——**"记得跑"不是机制**。
+    #   接在全链末尾，就等于"每次数据变了，快照自动跟着变"。
+    n += 1
+    step(n, "刷新数据快照（docs/实测数据.md）")
+    try:
+        import snapshot
+        snapshot.main()
+    except Exception as e:                        # noqa: BLE001
+        # 快照失败不该让"已经跑成功的全链"看起来像失败
+        print(f"  ⚠️ 快照生成失败（不影响全链结果）：{e}")
+
 
 if __name__ == "__main__":
     main()

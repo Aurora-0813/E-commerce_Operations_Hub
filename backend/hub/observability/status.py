@@ -120,6 +120,9 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
                    if t.decided_at and created_by_pid.get(t.proposal_id)]
 
         n_dead = s.scalar(select(func.count()).select_from(DeadLetter)) or 0
+        from hub.persistence.models import ActionOutcome
+        n_waiting = s.scalar(select(func.count()).select_from(ActionOutcome)
+                             .where(ActionOutcome.status == "WAITING")) or 0
 
         latest_anomaly_run = s.scalar(
             select(Anomaly.run_id).where(Anomaly.type == "price")
@@ -170,7 +173,11 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
                   for p in ("taobao", "jd"))),
         ("跨平台簇占比", f"{both}/{len(clusters)}（同时覆盖两平台）"),
         ("价格异常", f"{n_anomaly} 个"),
-        ("GMV 影响 Top3",
+        # ⚠️ 叫"涉及面"而不是"影响"：这里算的是"该簇涉及的商品的 90 天 GMV"，
+        #    同一个商品出现在多个簇里会被【重复计入】。
+        #    用它排"先做哪个"够用（衡量曝光面），但**不能当成"损失金额"**——
+        #    真正的损失要用因果估计，那是 M9 的 DID 干的事。
+        ("GMV 涉及面 Top3",
          "｜".join(f"{lbl}({tier}) {_money(g)}" for lbl, tier, _, g in gmv_top) or "—"),
         ("GMV 口径", (f"{gmv_win[0]}~{gmv_win[1]}（{gmv_win[2]} 天）"
                       if gmv_win and gmv_win[0] else "无销售数据")),
@@ -208,6 +215,7 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         ("自动执行率", _pct(auto, n_proposal)),
         ("L2/L3 占比", _pct(proposal_by_risk.get("L2", 0) + proposal_by_risk.get("L3", 0),
                             n_proposal)),
+        ("**等待观察窗口**", f"{n_waiting} 条（动作已做，14 天后才看得出效果）"),
         ("死信积压", f"{n_dead} 条待人工核对"),
         ("口径", "簇/异常/提案只看【最近一次运行】；商品/评价是存量"),
     ]

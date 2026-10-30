@@ -198,6 +198,11 @@ def _execute(call: ToolCall, ctx: CallContext, spec, args: dict,
     _finish_execution(execution_id, Decision.EXECUTED,
                       response=response, verify_ok=verify_ok, t0=t0)
 
+    # 副作用登记：这个动作要等一个观察窗口（M9 复盘用）。
+    # **由工具自己声明**（`outcome_metrics` 为空就不登记），网关不猜。
+    # 失败不影响执行结果——登记是记账，不是业务本身。
+    outcomes = _register_outcome(spec, args, call.proposal_id, ctx)
+
     return GatewayResult(
         decision=Decision.EXECUTED,
         tool_name=spec.name,
@@ -205,8 +210,20 @@ def _execute(call: ToolCall, ctx: CallContext, spec, args: dict,
         response=response,
         verify_ok=verify_ok,
         detail={"verify": verify_detail, "risk": spec.risk_level,
-                "attempts": attempt, "compensate": compensated},
+                "attempts": attempt, "compensate": compensated,
+                "outcomes": outcomes},
     )
+
+
+def _register_outcome(spec, args: dict, proposal_id: str,
+                      ctx: CallContext) -> int:
+    """登记"等待观察窗口"。返回登记了几条（0 = 这个工具没有效果指标）。"""
+    try:
+        from hub.action.outcome import register
+        return register(proposal_id, spec, args, tenant_id=ctx.tenant_id)
+    except Exception as e:                       # noqa: BLE001
+        print(f"  [outcome] 登记观察窗口失败（不影响执行）：{e}")
+        return 0
 
 
 def _compensate(spec, args: dict, response: dict, ctx: CallContext) -> dict:
@@ -251,11 +268,19 @@ def _dead_letter(spec, args: dict, error: Exception, attempts: int,
 
 def _replay(call: ToolCall, ctx: CallContext, spec, execution_id: str,
             t0: float) -> GatewayResult:
-    """幂等命中：不重复执行，返回上次的结果。"""
+    """幂等命中：不重复执行，返回上次的结果。
+
+    **顺便补登记观察窗口**：登记是幂等的（同一提案+同一商品只一条），
+    所以这里补一次不会重复。为什么需要补：
+        某些动作在"登记功能上线之前"就已经执行过（或者当时登记失败了），
+        重放时补上，就不用专门写一个回填脚本。
+    """
     with get_session() as s:
         row = s.get(ToolExecution, UUID(execution_id))
         response = row.response if row else None
         verify_ok = row.verify_ok if row else None
+    if verify_ok:
+        _register_outcome(spec, dict(call.args or {}), call.proposal_id, ctx)
     return GatewayResult(
         decision=Decision.REPLAYED,
         tool_name=spec.name,
