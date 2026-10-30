@@ -247,7 +247,8 @@ def cmd_propose(max_proposals: int = 6, execute: bool = True) -> None:
 
     print("\n=== 过网关 ===")
     # 用 manager 角色：L0/L1 会直接执行（设计如此），L2/L3 依然要人批
-    ctx = CallContext(role="manager", trace_id="propose-cli")
+    from hub.core.tracing import current_trace_id
+    ctx = CallContext(role="manager", trace_id=current_trace_id() or "propose-cli")
     tally = {}
     for pid in stats.ids:
         with get_session() as s:
@@ -315,9 +316,113 @@ def cmd_reject(task_id: str, by: str, note: str | None = None) -> None:
         print(f"❌ {res.get('reason')}")
 
 
+def cmd_trace(trace_id: str | None = None) -> None:
+    """M8：看一次运行的链路树（不传 trace_id 就列最近的）。"""
+    from sqlalchemy import func
+
+    from hub.core.tracing import print_tree
+    from hub.persistence.db import get_session
+    from hub.persistence.models import TraceSpan
+
+    if not trace_id:
+        with get_session() as s:
+            rows = s.execute(
+                select(TraceSpan.trace_id,
+                       func.count(TraceSpan.span_id),
+                       func.min(TraceSpan.start_ts),
+                       func.max(TraceSpan.end_ts))
+                .group_by(TraceSpan.trace_id)
+                .order_by(func.max(TraceSpan.start_ts).desc())
+                .limit(10)
+            ).all()
+        if not rows:
+            print("还没有任何 trace（先跑 `python scripts/run_all.py`）")
+            return
+        print("最近的 trace（用 `hub trace <trace_id>` 看详情）：\n")
+        for tid, n, st, et in rows:
+            dur = (et - st).total_seconds() if st and et else 0
+            print(f"  {tid[:16]}…  {n:4d} 个 span   {dur:8.1f}s   {st}")
+        return
+
+    print_tree(trace_id)
+
+
+def _print_sections(title: str, sections: list[tuple[str, list[tuple[str, str]]]]) -> None:
+    """统一的报表打印：大标题 + 分块 + 指标对齐。"""
+    print(f"\n{'=' * 66}")
+    print(f"  {title}")
+    print(f"{'=' * 66}")
+    for name, rows in sections:
+        print(f"\n【{name}】")
+        for label, value in rows:
+            print(f"  {label:<22} {value}")
+    print()
+
+
+def cmd_status() -> None:
+    """M8：业务数据现状（运营看）。"""
+    from hub.observability.status import collect
+
+    _print_sections("业务数据现状（hub status）", collect())
+    print("说明：这里看的是「当前库里的状态」，不随「跑一次」变。")
+    print("      想看「最近一次跑得怎么样」，用 `hub health`。")
+
+
+def cmd_health(trace_id: str | None = None) -> None:
+    """M8：最近一次运行的健康度（工程看）。"""
+    from hub.observability.health import collect
+
+    _print_sections("最近一次运行健康度（hub health）", collect(trace_id))
+    print("说明：这里看的是「最近一次运行」的耗时/成本/降级，每次跑完会变。")
+    print("      想看单次明细（哪一步慢），用 `hub trace <trace_id>`。")
+
+
+def cmd_eval(suite: str = "perturbation_v1", strict: bool = False) -> int:
+    """M8：跑离线评估套件，返回退出码（0 通过 / 非 0 门禁不过）。"""
+    from hub.eval.runner import run
+
+    print(f"跑用例集 {suite} ……\n")
+    report = run(suite)
+
+    last_cat = None
+    for r in report.results:
+        if r.category != last_cat:
+            print(f"\n【{r.category}】")
+            last_cat = r.category
+        icon = "✅" if r.passed else "❌"
+        gate = "hard" if r.gate == "hard" else "soft"
+        print(f"  {icon} {r.id:<3} [{gate}] {r.title}")
+        if not r.passed:
+            print(f"        期望 {r.expect}")
+            print(f"        实际 {r.actual}" + (f"｜{r.error}" if r.error else ""))
+
+    hard, soft = report.hard, report.soft
+    hard_ok = sum(1 for r in hard if r.passed)
+    soft_ok = sum(1 for r in soft if r.passed)
+
+    print(f"\n{'=' * 66}")
+    print(f"  硬门禁（安全类）{hard_ok}/{len(hard)} = {report.hard_rate * 100:.0f}%"
+          f"   要求 100%")
+    soft_req = "100%（--strict）" if strict else "≥95%"
+    print(f"  软门禁（质量类）{soft_ok}/{len(soft)} = {report.soft_rate * 100:.0f}%"
+          f"   要求 {soft_req}")
+    code = report.exit_code
+    if strict and code == 0 and report.soft_rate < 1.0:
+        code = 3                              # --strict：软门禁也要求全过
+    print(f"  结论：{'✅ 通过' if code == 0 else '❌ 不通过'}"
+          f"（退出码 {code}）")
+    print(f"{'=' * 66}")
+    if code:
+        print("\n提示：硬门禁失败必须修；软门禁允许极少数抖动。")
+    return code
+
+
 def main() -> None:
     """CLI 主入口。"""
     parser = argparse.ArgumentParser(prog="hub", description="跨平台电商 AI 运营决策中枢 CLI")
+    # 全局开关：跑完打印本次调用的链路树（放在子命令前面，如 `hub --trace mm ...`）
+    parser.add_argument("--trace", action="store_true",
+                        help="跑完打印本次调用的链路树（M8）")
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("skeleton", help="跑一次假数据全链（walking skeleton）")
@@ -374,7 +479,24 @@ def main() -> None:
     rj.add_argument("--by", required=True, choices=["operator", "manager"])
     rj.add_argument("--note", default=None, help="拒绝理由")
 
+    tr = sub.add_parser("trace", help="M8：看一次运行的链路树")
+    tr.add_argument("trace_id", nargs="?", default=None,
+                    help="trace ID（不传就列最近的 10 次）")
+
+    sub.add_parser("status", help="M8：业务数据现状（运营看）")
+    hp = sub.add_parser("health", help="M8：最近一次运行的健康度（工程看）")
+    hp.add_argument("--id", dest="health_trace", default=None,
+                    help="指定 trace_id（默认取最近一次全链）")
+
+    ev = sub.add_parser("eval", help="M8：跑离线评估套件（有退出码，可接 CI）")
+    ev.add_argument("--suite", default="perturbation_v1", help="用例集名（suites/<name>.yaml）")
+    ev.add_argument("--strict", action="store_true", help="软门禁也要求 100%")
+
     args = parser.parse_args()
+
+    # 每次 CLI 调用一个 trace_id：M1~M5 的 span 都挂到它下面
+    from hub.core.tracing import print_tree, set_trace_id
+    trace_id = set_trace_id()
 
     if args.cmd == "skeleton":
         cmd_skeleton()
@@ -403,8 +525,24 @@ def main() -> None:
         cmd_approve(args.task_id, args.by, args.note)
     elif args.cmd == "reject":
         cmd_reject(args.task_id, args.by, args.note)
+    elif args.cmd == "trace":
+        cmd_trace(args.trace_id)
+    elif args.cmd == "status":
+        cmd_status()
+    elif args.cmd == "health":
+        cmd_health(getattr(args, "health_trace", None))
+    elif args.cmd == "eval":
+        # eval 有退出码（CI 用），所以跑完直接 sys.exit
+        import sys
+        sys.exit(cmd_eval(args.suite, strict=args.strict))
     else:
         parser.print_help()
+        return
+
+    # `hub --trace <cmd>`：跑完把链路树打出来
+    if args.trace and args.cmd != "trace":
+        print()
+        print_tree(trace_id)
 
 
 if __name__ == "__main__":

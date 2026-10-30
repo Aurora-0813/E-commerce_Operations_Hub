@@ -44,7 +44,36 @@ def invoke(call: ToolCall, ctx: CallContext, *, approved: bool = False) -> Gatew
 
     :param approved: True 表示"人已经批了"——此时 L2/L3 **直接执行**（跳过转审批）。
                      只有 `hub approve` 在人工批准之后才会传 True。
+
+    另外：**每次判定后都会回写 `action_proposal.status`**。
+    为什么：L0/L1 是网关自己执行掉的，不走 `hub approve`；
+    如果这里不同步，提案状态会一直停在 PROPOSED，
+    而"已执行几个"这类报表就会读出一个假的 0（实测踩过）。
     """
+    result = _invoke_inner(call, ctx, approved=approved)
+    _sync_proposal_status(call.proposal_id, result.decision)
+    return result
+
+
+def _sync_proposal_status(proposal_id: str, decision: Decision) -> None:
+    """把判定结果写回提案（这样 `hub status` 才算得出真实的执行率）。"""
+    if not proposal_id:
+        return
+    try:
+        from hub.persistence.models import ActionProposal
+        with get_session() as s:
+            p = s.get(ActionProposal, UUID(proposal_id))
+            if p is None:
+                return
+            p.status = decision.value
+            if decision == Decision.EXECUTED:
+                p.dry_run = False
+            s.commit()
+    except Exception:                            # noqa: BLE001  状态同步失败不影响主流程
+        pass
+
+
+def _invoke_inner(call: ToolCall, ctx: CallContext, *, approved: bool = False) -> GatewayResult:
     t0 = time.time()
 
     # ---------- ① 存在性 ----------

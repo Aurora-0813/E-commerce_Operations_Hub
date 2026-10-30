@@ -21,6 +21,7 @@ from uuid import UUID
 from sqlalchemy import bindparam, select, update
 
 from hub.contracts import DQEVerdict
+from hub.core.tracing import traced
 from hub.dqe.fusion import decide
 from hub.dqe.ml import SpamModel
 from hub.dqe.normalize import normalize
@@ -41,6 +42,7 @@ class DqeStats:
     elapsed_s: float = 0.0      # 耗时
 
 
+@traced("m1.dqe")
 def run_dqe(
     *,
     batch_id: UUID | None = None,

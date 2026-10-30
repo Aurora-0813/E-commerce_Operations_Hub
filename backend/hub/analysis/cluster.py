@@ -34,6 +34,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import Normalizer
 
+from hub.core.tracing import traced
 from hub.llm import TextLLM, get_text_llm
 from hub.persistence.repo_cluster import ClusterRepo
 from hub.persistence.repository import RunRepo
@@ -119,6 +120,7 @@ def _split_topic(rows: list, indices: list[int], k: int) -> list[list[int]]:
     return keep
 
 
+@traced("m4.cluster")
 def run_clustering(
     *,
     max_per_topic: int = MAX_PER_TOPIC,

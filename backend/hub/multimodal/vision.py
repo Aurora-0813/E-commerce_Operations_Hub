@@ -110,25 +110,47 @@ class OllamaVision:
         self.name = model
 
     def tag(self, path: str) -> VisionTags:
-        # 1. 读图 → base64（Ollama 的 images 字段直接吃 base64，不要 data: 前缀）
-        b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+        """读图 → 调模型 → 解析。
 
-        # 2. 调 /api/chat（非流式、温度 0，保证输出稳定）
-        payload = {
-            "model": self.model,
-            "messages": [{
-                "role": "user",
-                "content": PROMPT,
-                "images": [b64],
-            }],
-            "stream": False,
-            "options": {"temperature": 0},
-        }
-        raw = self._post(f"{self.base_url}/api/chat", payload)
-        text = raw.get("message", {}).get("content", "")
+        **每次调用记一条 span**（`vision.extract`），和 `llm/client.py` 的
+        `llm.chat` 是一模一样的做法：
+            · 埋点放在**出网的边界**（客户端层），业务代码一行不动
+            · 父 span 由 contextvar 自动带出来（M2 的 `m2.multimodal`）
+            · 顺带记 token —— 否则"视觉成本"是黑盒（50 次调用一个 token 都不记）
 
-        # 3. 解析 JSON → VisionTags
-        return self._parse(text)
+        为什么是 10 行而不是在 engine 里塞子 span：
+            往业务函数里塞 `sp.add(...)` 等于把观测代码混进逻辑，
+            以后没人敢改业务代码。**水表装在管子上，不装在房间里。**
+        """
+        from hub.core.tracing import span
+
+        with span("vision.extract", kind="vision", model=self.model,
+                  image=Path(path).name) as sp:
+            # 1. 读图 → base64（Ollama 的 images 字段直接吃 base64，不要 data: 前缀）
+            b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+            sp.add(image_kb=round(len(b64) * 3 / 4 / 1024, 1))
+
+            # 2. 调 /api/chat（非流式、温度 0，保证输出稳定）
+            payload = {
+                "model": self.model,
+                "messages": [{
+                    "role": "user",
+                    "content": PROMPT,
+                    "images": [b64],
+                }],
+                "stream": False,
+                "options": {"temperature": 0},
+            }
+            # 图片也吃 token（Vision 的 prompt_eval_count 包含图片编码）
+            raw = self._post(f"{self.base_url}/api/chat", payload)
+            sp.add_tokens(raw.get("prompt_eval_count"), raw.get("eval_count"))
+            text = raw.get("message", {}).get("content", "")
+
+            # 3. 解析 JSON → VisionTags
+            tags = self._parse(text)
+            sp.add(defect=tags.defect_type, severity=tags.severity,
+                   confidence=tags.confidence)
+            return tags
 
     def _post(self, url: str, payload: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")

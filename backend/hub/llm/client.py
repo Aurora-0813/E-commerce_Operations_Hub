@@ -44,33 +44,46 @@ class OllamaText:
              temperature: float = 0.0, max_tokens: int | None = None) -> str:
         """发一条对话，返回模型输出的纯文本。
 
+        **每次调用都会记一条 span**（`llm.chat`），并写入真实的 token 数
+        （Ollama 返回里的 prompt_eval_count / eval_count）。
+
+        为什么 token 这么重要：M3 一次跑 57 次 LLM 调用，
+        没有 token 数据就只能"感觉一下贵不贵"；有了它才知道钱花在哪。
+
         :param prompt:      用户消息
         :param system:      系统提示词（可空）
         :param temperature: 温度（0 = 尽量确定性，分类任务必须用 0）
         :param max_tokens:  最大输出 token 数（可空）
         :raises RuntimeError: 连接失败 / HTTP 错误 / 返回为空
         """
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        from hub.core.tracing import span
 
-        options: dict = {"temperature": temperature}
-        if max_tokens:
-            options["num_predict"] = max_tokens
+        with span("llm.chat", kind="llm", model=self.model,
+                  prompt_chars=len(prompt)) as sp:
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": options,
-        }
+            options: dict = {"temperature": temperature}
+            if max_tokens:
+                options["num_predict"] = max_tokens
 
-        raw = self._post(f"{self.base_url}/api/chat", payload)
-        content = (raw.get("message") or {}).get("content", "")
-        if not content.strip():
-            raise RuntimeError(f"LLM 返回为空（model={self.model}）")
-        return content
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "stream": False,
+                "options": options,
+            }
+
+            raw = self._post(f"{self.base_url}/api/chat", payload)
+            # Ollama 的返回带 token 统计：本地模型成本≈电费，但 token 是真实数字
+            sp.add_tokens(raw.get("prompt_eval_count"), raw.get("eval_count"))
+            content = (raw.get("message") or {}).get("content", "")
+            if not content.strip():
+                raise RuntimeError(f"LLM 返回为空（model={self.model}）")
+            sp.add(answer_chars=len(content))
+            return content
 
     def _post(self, url: str, payload: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")

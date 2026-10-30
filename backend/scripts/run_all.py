@@ -125,6 +125,11 @@ def main() -> None:
     ap.add_argument("--no-reset", action="store_true", help="不清空数据库")
     args = ap.parse_args()
 
+    # 整个全链共用一个 trace_id：M1~M5 的 span 都会挂到它下面，最后打印成一棵树
+    from hub.core.tracing import print_tree, set_trace_id
+    trace_id = set_trace_id()
+    print(f"[trace_id] {trace_id}\n")
+
     t0 = time.time()
     n = 0
 
@@ -195,6 +200,13 @@ def main() -> None:
     print(f"\n{'=' * 64}")
     print(f"✅ 全链完成，用时 {time.time() - t0:.1f}s")
     print(f"{'=' * 64}")
+
+    # 最后打印这次运行的 span 树（哪一步慢、哪次 LLM 调用贵，一目了然）
+    print(f"\n{'=' * 64}")
+    print("本次运行的 trace（也可以用 `python -m hub.cli trace "
+          f"{trace_id}` 再查）")
+    print(f"{'=' * 64}")
+    print_tree(trace_id)
 
 
 if __name__ == "__main__":

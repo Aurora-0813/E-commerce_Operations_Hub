@@ -20,6 +20,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from hub.contracts import VisionTags
+from hub.core.tracing import traced
 from hub.multimodal.phash import phash
 from hub.multimodal.sandbox import Sandbox
 from hub.multimodal.text_hint import infer_defect_from_text
@@ -50,6 +51,7 @@ class MultimodalStats:
     elapsed_s: float = 0.0
 
 
+@traced("m2.multimodal", kind="vision")
 def run_multimodal(
     image_package: str | Path,
     *,

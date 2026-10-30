@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from hub.analysis.attribute import attribute_cell
 from hub.analysis.classify import classify_many
+from hub.core.tracing import span
 from hub.llm import TextLLM, get_text_llm
 from hub.persistence.repo_topic import ReviewTopicRepo
 from hub.persistence.repository import RunRepo
@@ -83,6 +84,28 @@ def run_topic_analysis(
     min_cell: int = MIN_CELL_SIZE,
     llm: TextLLM | None = None,
 ) -> TopicStats:
+    """跑一次 M3 归因链（外层包一个 span，子步骤自己再开 span）。"""
+    with span("m3.topic_analysis", kind="step",
+              force=force, limit=limit, batch_size=batch_size) as sp:
+        stats = _run_topic_analysis_inner(
+            force=force, limit=limit, batch_size=batch_size,
+            rating_max=rating_max, min_cell=min_cell, llm=llm,
+        )
+        sp.add(total=stats.total, classified=stats.classified,
+               attributed=stats.attributed, failed=stats.failed_cells,
+               evidence=stats.evidence_total, dropped=stats.evidence_dropped)
+        return stats
+
+
+def _run_topic_analysis_inner(
+    *,
+    force: bool = False,
+    limit: int | None = None,
+    batch_size: int = 10,
+    rating_max: int = 2,
+    min_cell: int = MIN_CELL_SIZE,
+    llm: TextLLM | None = None,
+) -> TopicStats:
     """跑一次 M3 归因链。
 
     :param force:      True = 全量重算；False = 只处理没分类过的（增量）
@@ -107,9 +130,14 @@ def run_topic_analysis(
 
         # ---------- ② 分类 ----------
         items = [{"record_id": str(r.id), "text": r.content_clean} for r in rows]
-        results, cstats = classify_many(
-            llm, items, batch_size=batch_size, model_version=llm.name
-        )
+        with span("m3.classify", pending=len(items),
+                  batch_size=batch_size, model=llm.name) as sp:
+            results, cstats = classify_many(
+                llm, items, batch_size=batch_size, model_version=llm.name
+            )
+            sp.add(batches=cstats.batches, batch_ok=cstats.batch_ok,
+                   retry_ok=cstats.retry_ok, fallback=cstats.fallback,
+                   multi_label=cstats.multi_label)
         stats.batch_ok = cstats.batch_ok
         stats.retry_ok = cstats.retry_ok
         stats.fallback = cstats.fallback
@@ -153,8 +181,15 @@ def run_topic_analysis(
         reviews = repo.fetch_cell_reviews(topic, platform, limit=MAX_CELL_REVIEWS)
         payload = [{"review_id": str(r.id), "text": r.content_clean} for r in reviews]
 
-        result = attribute_cell(llm, topic, platform, payload,
-                                model_version=llm.name)
+        result = None
+        with span(f"m3.attribute.{topic}/{platform}", kind="step",
+                  topic=topic, platform=platform, count=n) as sp:
+            result = attribute_cell(llm, topic, platform, payload,
+                                    model_version=llm.name)
+            if result is not None:
+                sp.add(evidence=len(result.get("evidence") or []),
+                       dropped=result.get("dropped", 0),
+                       confidence=result.get("confidence"))
         if result is None:
             # 失败 ≠ 跳过：跳过是"样本不够，本来就不该归因"，
             # 失败是"该归因但模型输出不可用"，必须分开统计，否则看不出问题。

@@ -30,6 +30,7 @@ imagehash                  # pHash
 tenacity                   # 重试
 structlog                  # 结构化日志
 python-dotenv              # 环境变量
+pyyaml                     # M8 评估用例集（suites/*.yaml）
 
 # ============ 测试 ============
 pytest

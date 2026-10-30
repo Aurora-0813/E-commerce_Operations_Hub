@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from hub.action.compliance import check as check_compliance
 from hub.action.compliance import flag_strings
+from hub.core.tracing import traced
 from hub.llm import TextLLM, get_text_llm
 from hub.persistence.db import get_session
 from hub.persistence.models import (
@@ -231,6 +232,7 @@ def _build_args(tool: str, cluster, members: list, topic: str, llm: TextLLM,
     }
 
 
+@traced("m5.propose")
 def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> ProposalStats:
     """给 P0/P1 的簇生成提案（写库，不执行）。"""
     import time
