@@ -61,6 +61,18 @@ def load_pred(gold_ids: list[str]) -> dict[str, str]:
     return {r.platform_review_id: r.topic for r in rows}
 
 
+def load_texts(gold_ids: list[str]) -> dict[str, str]:
+    """取原文，用来在错例里展示"为什么模型会判错"。"""
+    if not gold_ids:
+        return {}
+    with get_session() as s:
+        rows = s.execute(
+            select(RecordRow.platform_review_id, RecordRow.content_clean)
+            .where(RecordRow.platform_review_id.in_(gold_ids))
+        ).all()
+    return {r.platform_review_id: (r.content_clean or "") for r in rows}
+
+
 def main() -> None:
     gold = load_gold()
     print(f"人工标注（问题类）: {len(gold)} 条")
@@ -73,6 +85,7 @@ def main() -> None:
         print("\n❌ 没有交集——检查 gold 的『记录ID』和 record.platform_review_id 是否对得上")
         return
     print(f"可评测            : {len(common)} 条\n")
+    texts = load_texts(common)
 
     # ---------- 准确率 ----------
     correct = sum(1 for k in common if gold[k] == pred[k])
@@ -103,11 +116,42 @@ def main() -> None:
             cells.append(f"{n:>10}")
         print(f"{g:<15}{''.join(cells)}")
 
-    # ---------- 错例 ----------
+    # ---------- 错例：按"真实 → 预测"分组 + 带原文 ----------
+    #
+    # 为什么必须分组、必须给原文：
+    #   只列 "ID + 人工=size 模型=quality" 看不出【为什么会错】。
+    #   按 (真实, 预测) 对分组之后，"哪两类在系统性互相混淆" 一眼可见——
+    #   那才是能改提示词的信号（比如 desc_mismatch 频繁被判成 misship，
+    #   说明两个类目的定义边界不清，而不是模型笨）。
     wrong = [(k, gold[k], pred[k]) for k in common if gold[k] != pred[k]]
-    print(f"\n=== 判错 {len(wrong)} 条（前 10 条）===")
-    for rid, g, p_ in wrong[:10]:
-        print(f"  {rid}  人工={g:<14} 模型={p_}")
+    print(f"\n=== 判错 {len(wrong)} 条，按【真实→预测】分组===")
+
+    pairs: dict[tuple[str, str], list[str]] = {}
+    for rid, g, p_ in wrong:
+        pairs.setdefault((g, p_), []).append(rid)
+    for (g, p_), ids in sorted(pairs.items(), key=lambda kv: -len(kv[1])):
+        print(f"\n  {g} → {p_}   {len(ids)} 条")
+        for rid in ids[:2]:                    # 每组抽 2 条看原文
+            print(f"    原文：{texts.get(rid, '（未取到）')[:70]}")
+            print(f"    ID：{rid}")
+
+    if not wrong:
+        print("  （零错误）")
+
+    # ---------- 错因归类（规则化的，不是拍脑袋）----------
+    print("\n=== 错因归类 ===")
+    reasons = Counter()
+    for (g, p_) in pairs:
+        if {g, p_} <= {"desc_mismatch", "misship"}:
+            reasons["语义重叠：描述不符 vs 发错货"] += len(pairs[(g, p_)])
+        elif {g, p_} <= {"quality", "size"}:
+            reasons["语义重叠：质量问题 vs 尺码问题"] += len(pairs[(g, p_)])
+        elif {g, p_} <= {"logistics", "service"}:
+            reasons["语义重叠：物流 vs 客服"] += len(pairs[(g, p_)])
+        else:
+            reasons[f"其他：{g} ↔ {p_}"] += len(pairs[(g, p_)])
+    for k, v in reasons.most_common():
+        print(f"  {v:>3} 条  {k}")
 
     # ---------- 诚实提示 ----------
     print("\n" + "=" * 52)

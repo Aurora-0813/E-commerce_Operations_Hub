@@ -64,13 +64,36 @@ PROMPT_TEMPLATE = (
     "- desc_mismatch  描述不符：实物颜色/面料/厚薄**和页面写的不一样**\n"
     "- misship        错发漏发：**发错颜色/尺码/款式**、漏发、少发\n"
     "- other          抱怨了但说不清具体问题\n\n"
-    "按这个格式输出，每条一行，不要其他内容：\n"
+    "输出格式（每条一行，不要其他内容）：\n"
     "R1: quality,size | 3\n"
     "R2: logistics | 2\n\n"
-    "说明：竖线前是问题（逗号分隔，最多 2 个，最重要的在前），"
-    "竖线后是严重度（1~5 的整数）。\n\n"
+    "说明：竖线前是问题（逗号分隔，最多 2 个，最重的在前），竖线后是严重度（1~5）。\n\n"
     "评价列表：\n{listing}\n"
 )
+
+# ============ 两个被数据否掉的尝试（记录在此，避免以后重复踩）============
+#
+# ① 【加"区分提到与抱怨"的规则】→ 净负收益，已撤
+#    动机：错例 "发货慢…质量对得起价格" 被判成 quality（好评词触发）
+#    做法：在提示词里加"…质量对得起价格 是好评，不算 quality 问题"
+#    结果：95.8% → 93.1%（4 轮确定性复现）
+#          desc_mismatch 从 3/3 掉到 1/3，misship 从 8/8 掉到 7/8
+#          而它想修的那条**根本没修好**
+#    原因：把"颜色很正/颜色比图片好看"举例成"好评"，
+#          模型开始回避【所有带颜色的句子】→ 色差/发错颜色反而判错。
+#    ⚠️ 教训：给模型举反例时，反例涉及的**关键词会连带被压制**。
+#
+# ② 【要求模型回显原文片段，用于检测串行】→ 代价不划算，已撤
+#    结果：耗时 215s → 318s（+48%），收益是抓到约 1% 的串行
+#          而且它自己引入新失败模式（模型漏写某一栏 → 整批报废）
+#    ⚠️ 但那次实验意外发现了一件**更有价值的事**：
+#          回显校验误把 76 条打回逐条重试 → 准确率 97.2%
+#          → **单条分类比批量分类更准**（见下方 batch_size 的说明）
+#
+# 【确定性的事实】：同一提示词连跑 3 次，准确率/多标签/耗时完全一致
+#    （scripts/measure_noise.py 实测 93.1% / 93.1% / 93.1%）
+#    → 所以"提示词改动导致的准确率变化"是**可信的**，不是噪声。
+#    → 之前把它当噪声，是误判。
 
 # 提示词版本号 = 模板内容的 SHA256 前 8 位。
 # 为什么要记：提示词改过 3 次（JSON 数组 → 行格式 → P4），
@@ -86,36 +109,71 @@ def _build_prompt(items: list[tuple[str, str]]) -> str:
         n=len(items), max_topics=MAX_TOPICS, listing=listing)
 
 
-def _parse_lines(text: str) -> dict[str, dict] | None:
-    """解析「R1: quality,size | 3」格式。
+def _norm(s: str) -> str:
+    """归一化后再做"子串在不在原文里"的判断。
 
-    注意：不要用 `([^|]+?) + 可选组` —— 非贪婪 + 可选会让它只匹配 1 个字符。
-    这里用"贪婪 + 竖线必须有"，再对没有竖线的情况兜底。
+    为什么需要：模型回显时常用的标点和原文不一定一致——
+        模型：'版型有问题, 肩宽对不上'（半角逗号 + 空格）
+        原文：'版型有问题，肩宽对不上'（全角逗号）
+        直接 `in` 判断会失败 → 把正确的标签当串行剔除。
+    NFKC 会把全角标点转半角；再去掉所有空白。
+    """
+    import unicodedata
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+
+
+def _parse_lines(text: str) -> dict[str, dict] | None:
+    """解析「R1|quality,size|3|回显」格式（也兼容旧格式和缺回显的 3 段格式）。
+
+    **格式设计的关键**：必要字段在前（问题、严重度），**校验字段（回显）放在最后**。
+
+        为什么不能把回显放中间：
+            2026-10 实测，模型约 9% 的批次会漏掉中间那一栏，
+            输出 `R1|回显|2` —— 整行报废 → 整批 0/10 → 10 条好数据被格式抖动带走。
+            而且重试没用：temperature=0，同样的提示词必然给同样的错输出。
+
+        放到最后之后：
+            漏了回显 → `R1|quality|2` → 前两段还在 → 分类可用 ✅（只是无法校验）
+            有回显   → 三者齐全 → 顺便核对有没有串行 ✅
     """
     out: dict[str, dict] = {}
     for line in text.splitlines():
-        m = re.match(r"\s*(R\d+)\s*[:：]\s*(.+)", line)
+        m = re.match(r"\s*(R\d+)\s*([:：|])\s*(.+)", line)
         if not m:
             continue
-        rid, rest = m.group(1), m.group(2).strip()
+        rid, sep, rest = m.group(1), m.group(2), m.group(3).strip()
 
-        severity = None
-        if "|" in rest:
-            left, right = rest.split("|", 1)
-            rest = left.strip()
-            dm = re.search(r"(\d)", right)
-            if dm:
-                severity = int(dm.group(1))
+        if sep == "|":
+            parts = [p.strip() for p in rest.split("|")]
+            if len(parts) < 2:
+                continue
+            # parts[0]=问题, parts[1]=严重度, parts[2]（可选）=回显
+            topics_raw = parts[0]
+            try:
+                severity = int(re.search(r"(\d)", parts[1]).group(1))
+            except (AttributeError, TypeError):
+                severity = None
+            quote = parts[2] or None if len(parts) >= 3 else None
         else:
-            dm = re.search(r"(\d)\s*$", rest)     # 兜底：末尾单个数字
-            if dm:
-                severity = int(dm.group(1))
-                rest = rest[:dm.start()].strip()
+            # 旧格式：`R1: quality,size | 3`
+            topics_raw, quote = rest, None
+            severity = None
+            if "|" in rest:
+                left, right = rest.split("|", 1)
+                topics_raw = left.strip()
+                dm = re.search(r"(\d)", right)
+                if dm:
+                    severity = int(dm.group(1))
+            else:
+                dm = re.search(r"(\d)\s*$", rest)
+                if dm:
+                    severity = int(dm.group(1))
+                    topics_raw = rest[:dm.start()].strip()
 
-        topics = [t.strip() for t in re.split(r"[,，/、\s]+", rest) if t.strip()]
+        topics = [t.strip() for t in re.split(r"[,，/、\s]+", topics_raw) if t.strip()]
         topics = [t for t in topics if t in TOPICS][:MAX_TOPICS]
         if topics:
-            out[rid] = {"topics": topics, "severity": severity}
+            out[rid] = {"topics": topics, "severity": severity, "quote": quote}
     return out or None
 
 
@@ -141,16 +199,26 @@ def _validate(parsed: dict | None, items: list[tuple[str, str]]) -> dict[str, di
         out[rid] = {
             "topics": topics,
             "severity": int(_clamp(data.get("severity"), 1, 5, 3)),
+            # ⚠️ quote 必须透传！第一版这里只保留了 topics/severity，
+            # 结果 _try_batch 拿到 quote=None → 把所有正确的标签都当"串行"剔除了。
+            "quote": data.get("quote"),
         }
     return out
 
 
-def _try_batch(llm: TextLLM, pairs: list[tuple[str, str]]) -> dict[str, dict]:
-    """一次分类 N 条，返回 {rid: {topics, severity}}；失败返回空 dict。"""
+def _try_batch(llm: TextLLM, pairs: list[tuple[str, str]],
+               require_quote: bool = False) -> dict[str, dict]:
+    """一次分类 N 条，返回 {rid: {topics, severity}}；失败返回空 dict。
+
+    :param require_quote: True 时强制核对"回显片段确实是这一条的原文"。
+        **批量调用必须开**（防行号错位）；单条调用不用开
+        （只有一条，不可能串行；而且强制回显会让"模型没写回显"的正确答案被丢掉）。
+    """
     n = len(pairs)
+    text_by_rid = dict(pairs)
     try:
-        # 每条一行文本（约 15 token），留足余量
-        raw = llm.chat(_build_prompt(pairs), max_tokens=100 + 30 * n)
+        # 每条一行文本（约 15 token + 回显），留足余量
+        raw = llm.chat(_build_prompt(pairs), max_tokens=120 + 40 * n)
     except Exception as e:                       # noqa: BLE001 上层要降级，不能抛
         print(f"  [分类] 批量调用失败：{e}")
         return {}
@@ -161,7 +229,33 @@ def _try_batch(llm: TextLLM, pairs: list[tuple[str, str]]) -> dict[str, dict]:
               f"    头：{raw[:100]!r}\n"
               f"    尾：{raw[-100:]!r}")
         return {}
-    return _validate(parsed, pairs)
+    before = len(parsed)
+    parsed = _validate(parsed, pairs)
+    if require_quote and before != len(parsed):
+        print(f"  [分类] 校验后丢弃 {before - len(parsed)} 条（主题为空/严重度非法）")
+
+    if require_quote:
+        # 核对"回显片段属于这一条"：对不上说明模型串了行（合并两行后重新编号）。
+        # ⚠️ 回显是**可选**字段：没写就**不校验、保留分类结果**
+        #    （宁可少一次校验，也不要因为模型偷懒把正确答案丢掉）。
+        kept, dropped, unverified = {}, [], 0
+        for rid, data in parsed.items():
+            q = _norm(data.get("quote") or "")
+            if not q:
+                kept[rid] = data
+                unverified += 1
+            elif q in _norm(text_by_rid.get(rid, "")):
+                kept[rid] = data
+            else:
+                dropped.append(rid)
+        if dropped:
+            print(f"  [分类] 回显对不上原文，剔除 {len(dropped)} 条"
+                  f"（疑似串行：{','.join(dropped[:5])}）→ 转逐条重试")
+        if unverified:
+            print(f"  [分类] {unverified}/{len(parsed)} 条没写回显 —— "
+                  f"保留分类，但这几条无法校验串行")
+        return kept
+    return parsed
 
 
 def _to_row(record_id: str, data: dict, impl: str,
@@ -216,7 +310,22 @@ def classify_many(llm: TextLLM, items: list[dict], *, batch_size: int = 10,
         pairs = [(rid, _clean(it["text"])) for rid, it in id_map.items()]
 
         stats.batches += 1
-        parsed = _try_batch(llm, pairs)          # ① 批量
+        # require_quote=False：提示词不再要求回显，所以不校验串行
+        # （解析器仍兼容带回显的格式，将来换更强的模型可以直接打开）
+        parsed = _try_batch(llm, pairs)
+
+        # ①.5 缺失的**重新组批**再试一次
+        #
+        # 为什么要有这一层：2026-10 实测，45 个批次里有 4 个整批失败
+        # （模型偶尔漏掉"问题"那一段，输出 `R1|回显|严重度`）。
+        # 如果直接落到"逐条重试"，40 条 × 4 秒 = 160 秒——**一次格式抖动罚 2.7 分钟**。
+        # 重新组批只要 1 次调用，而且模型第二次往往就写对了（格式抖动是随机的）。
+        missing = [rid for rid in id_map if rid not in parsed]
+        if missing and parsed:
+            retry_pairs = [(rid, txt) for rid, txt in pairs if rid in missing]
+            stats.batches += 1
+            again = _try_batch(llm, retry_pairs)
+            parsed.update(again)
 
         for rid, it in id_map.items():
             if rid in parsed:
@@ -227,7 +336,8 @@ def classify_many(llm: TextLLM, items: list[dict], *, batch_size: int = 10,
                 if len(row["secondary_topics"]) >= 1:
                     stats.multi_label += 1
 
-        # 漏掉/格式错的，逐条重试（②）
+        # 漏掉/格式错/回显对不上的，逐条重试（②）
+        # 逐条时不开 require_quote：只有一条，不可能串行
         for rid, it in id_map.items():
             if rid in parsed:
                 continue
