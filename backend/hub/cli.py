@@ -411,9 +411,15 @@ def cmd_retro(dry_run: bool = False, all_: bool = False) -> None:
         print("\n（--dry-run：结论没有写回数据库）")
 
 
-def cmd_eval(suite: str = "perturbation_v1", strict: bool = False) -> int:
-    """M8：跑离线评估套件，返回退出码（0 通过 / 非 0 门禁不过）。"""
-    from hub.eval.runner import run
+def cmd_eval(suite: str = "perturbation_v1", strict: bool = False,
+             save: bool = True) -> int:
+    """M8：跑离线评估套件，返回退出码（0 通过 / 非 0 门禁不过）。
+
+    阶段 2.1 起**默认落库**（`eval_case` + `eval_result`）——
+    没有历史的门禁只能回答"这次过没过"，回答不了"是不是在退化"。
+    `--no-save` 可以不写库（比如临时试一遍）。
+    """
+    from hub.eval.runner import load_suite, run
 
     print(f"跑用例集 {suite} ……\n")
     report = run(suite)
@@ -445,10 +451,230 @@ def cmd_eval(suite: str = "perturbation_v1", strict: bool = False) -> int:
         code = 3                              # --strict：软门禁也要求全过
     print(f"  结论：{'✅ 通过' if code == 0 else '❌ 不通过'}"
           f"（退出码 {code}）")
+
+    # ---- 落库（阶段 2.1）----
+    if save:
+        try:
+            from hub.eval.store import save_report, sync_cases
+            suite_data = load_suite(suite)
+            n = sync_cases(suite, suite_data.get("cases") or [])
+            run_id = save_report(report, suite)
+            print(f"  已落库：{run_id}（同步 {n} 条用例定义，写 {len(report.results)} 条结果）")
+        except Exception as e:                # noqa: BLE001
+            # 落库失败**不能**影响门禁结论 —— 门禁是安全线，日志是辅助
+            print(f"  ⚠️ 落库失败（不影响门禁结论）：{type(e).__name__}: {e}")
+
     print(f"{'=' * 66}")
     if code:
         print("\n提示：硬门禁失败必须修；软门禁允许极少数抖动。")
     return code
+
+
+def cmd_eval_history(limit: int = 10, reset: bool = False) -> int:
+    """看历史评测（阶段 2.1）：回答"门禁是不是在退化"。
+
+    `reset=True` 时清空所有历史 —— 只在**发现了坏记录**时用
+    （比如 2026-10-31 那次：run_id 只精确到分钟，两次运行被合并成 38/38，
+     那条记录会永远污染统计）。
+    """
+    from hub.eval.store import clear, failures, history
+
+    if reset:
+        n = clear(keep=0)
+        print(f"已清空评测历史（删除 {n} 条结果）。用例定义 eval_case 保留。")
+        return 0
+
+    rows = history(limit)
+    if not rows:
+        print("还没有落库的评测记录（先跑一次 `hub eval`）。")
+        return 0
+
+    print(f"{'=' * 66}")
+    print(f"  最近 {len(rows)} 次评测")
+    print(f"{'=' * 66}")
+    print(f"  {'运行 ID':<28}{'硬门禁':<10}{'软门禁':<10}")
+    for r in rows:
+        h_ok, h_all = r["hard"]
+        s_ok, s_all = r["soft"]
+        print(f"  {r['run_id']:<28}{f'{h_ok}/{h_all}':<10}{f'{s_ok}/{s_all}':<10}")
+
+    # 最近一次失败的用例（"哪条红了"比"红了几条"有用）
+    last = rows[0]["run_id"]
+    bad = failures(last)
+    if bad:
+        print(f"\n  最近一次（{last}）失败的用例：")
+        for r in bad:
+            print(f"    ❌ {r.id} [{r.gate}] 期望 {r.expect}")
+    else:
+        print(f"\n  最近一次（{last}）全绿 ✅")
+    return 0
+
+
+def _resolve_cluster_id(raw: str) -> str | None:
+    """把"前 8 位前缀"或完整 UUID 解析成完整 UUID 字符串。
+
+    为什么要支持前缀：36 位 UUID 人抄不动（**模型也抄不动**，实测抄错一位 ✅），
+    而这个命令是给人用的 → 8 位前缀足够区分（库里最多几十个簇 ✅）
+    """
+    from uuid import UUID
+
+    from sqlalchemy import select
+
+    from hub.persistence.db import get_session
+    from hub.persistence.models import IssueCluster
+
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    # 完整 UUID：直接返回（但也要确认它存在，避免 agent 拿着不存在的 id 跑）
+    try:
+        full = UUID(raw)
+        with get_session() as s:
+            return str(full) if s.get(IssueCluster, full) is not None else None
+    except ValueError:
+        pass
+    # 前缀：在库里找唯一匹配
+    # 注意：`cast` 要的是 SQLAlchemy 的 TypeEngine（`Text`），**不是 Python 的 `str`**
+    #       —— 传 `str` 会报 `Object '' associated with '.type' attribute is not a
+    #       TypeEngine class`（实测踩过）
+    from sqlalchemy import Text, cast
+    with get_session() as s:
+        rows = s.scalars(
+            select(IssueCluster).where(
+                cast(IssueCluster.id, Text).like(f"{raw}%"))
+        ).all()
+    return str(rows[0].id) if len(rows) == 1 else None
+
+
+def cmd_handle(cluster_id: str | None, *, save: bool = True, role: str = "operator",
+               adopt: bool = False, submit: bool = False,
+               critic: bool = False, use_rule: bool = True) -> int:
+    """阶段 3：让 agent 处理一个问题簇（形态 ③：步骤代码定，模型只判断）。
+
+    **不带 `cluster_id` 时，列出可选的簇**（id 前 8 位 + 名字 + P 档），
+    然后你可以 `hub handle 2adf0897` 这样用前缀 ✅
+    （前缀会被解析成完整 UUID —— 因为模型/人不该手抄 36 位 ✅）
+
+    输出三段：
+        ① 轨迹（每步调了哪个只读工具、拿到多少字、耗时）
+        ② 证据（每条带编号 E1..En —— 供人核对"依据是什么"）
+        ③ 结论（建议 + 工具 + 置信度），以及**校验结果**（有没有编造引用）
+    """
+    import time as _t
+
+    from sqlalchemy import select
+
+    from hub.persistence.db import get_session
+    from hub.persistence.models import IssueCluster
+
+    # ---- 不带参数：列出可选的簇（省得人去别处找 ID）----
+    if not cluster_id:
+        with get_session() as s:
+            rows = s.scalars(
+                select(IssueCluster)
+                .order_by(IssueCluster.priority_score.desc().nullslast())
+                .limit(30)
+            ).all()
+        if not rows:
+            print("库里没有簇（先跑全链）。")
+            return 1
+        print("可交给 agent 的问题簇（用【前 8 位】即可，如 `hub handle 2adf0897`）：\n")
+        print(f"  {'ID':<10}{'优先级':<8}{'条数':<6}{'簇名'}")
+        for c in rows:
+            print(f"  {str(c.id)[:8]:<10}{c.priority_tier or '?':<8}{c.review_count:<6}{c.label}")
+        print("\n提示：P0/P1 优先（它们是影响最大的）✅")
+        return 0
+
+    # ---- 把前缀解析成完整 UUID ----
+    raw = cluster_id.strip().replace("<", "").replace(">", "")   # 防手滑粘了尖括号
+    cluster_id = _resolve_cluster_id(raw)
+    if cluster_id is None:
+        print(f"找不到簇：{raw!r}。跑 `hub handle`（不带参数）看可选列表。")
+        return 1
+
+    # ⚠️ `system` 角色会绕过 L2/L3 的审批红线（CallContext.has_role 没有 system 豁免，
+    #    但 role="system" 的 order=0 最低，反而**不能**调需要 operator 的工具 ✅）
+    #    这里只做提示，不阻止 —— 因为真有系统自调用场景。
+    if role == "system":
+        print("⚠️ 以 system 身份运行：工具权限最低，需要 operator 的工具会被拒。")
+
+    cid = cluster_id  # 已在 cmd_handle 开头解析成完整 UUID
+    print(f"agent 处理簇 {cid} ……（形态③：4 步，模型只在第 4 步判断）\n")
+    t0 = _t.time()
+    from hub.agent.handle import handle          # noqa: E402（延迟导入：CLI 启动快）
+    r = handle(cid, actor_role=role, use_critic=critic, use_rule=use_rule)
+    dt = _t.time() - t0
+
+    print("【轨迹】")
+    for s in r.steps:
+        mark = "✅" if s.ok else "❌"
+        args = ", ".join(f"{k}={v}" for k, v in (s.args or {}).items())
+        print(f"  {mark} 第{s.idx}步 {s.tool}（{args}）　{s.chars} 字　{s.ms}ms")
+        if s.error:
+            print(f"       └ {s.error}")
+
+    print("\n【证据】（每条都能追溯；模型只能引用这些编号）")
+    for e in r.evidence:
+        print(f"  {e['ref']}　[{e['source']}] {e['text']}")
+
+    print("\n【结论】")
+    if r.status == "FAILED":
+        print(f"  ❌ 失败：{r.error}")
+        return 1
+    if r.needs_human:
+        print(f"  ⚠️ 需要人工：{r.recommendation}")
+    else:
+        print(f"  建议：{r.recommendation}")
+        print(f"  动作：{r.tool}　置信度：{r.confidence:.0%}")
+
+    # 校验结果单独打出来（"编造了几条引用"是这一层的核心指标）
+    verify = [e for e in r.evidence if e["ref"] == "E-VERIFY"]
+    if verify:
+        print(f"  校验：{verify[0]['text']}")
+    # Critic 的结论单独展示（它是"第二个模型怎么看" ✅）
+    crit = [e for e in r.evidence if e["ref"] == "E-CRITIC"]
+    if crit:
+        print(f"  {crit[0]['text']}")
+
+    # ---- 采纳：把结论变成一个正式提案（决策 #23）----
+    # 顺序很重要：**先采纳（构造参数要用 LLM），再落 agent_run（要回填 proposal_id）**
+    proposal_id = None
+    if adopt:
+        print("\n【采纳】")
+        if r.needs_human:
+            print("  ⚠️ 跳过：状态是 NEEDS_HUMAN，没有明确建议可采纳")
+        else:
+            from hub.agent.adopt import adopt as adopt_run
+            try:
+                proposal_id = adopt_run(r)
+            except Exception as e:          # noqa: BLE001
+                print(f"  ⚠️ 采纳失败：{type(e).__name__}: {e}")
+
+            # 采纳成功后，可选地立刻提交网关（**这不是默认行为** ——
+            # "建议"和"要执行"之间应该有人按一下 ✅）
+            if proposal_id and submit:
+                from hub.agent.adopt import submit as submit_proposal
+                try:
+                    submit_proposal(proposal_id, role=role)
+                except Exception as e:      # noqa: BLE001
+                    print(f"  ⚠️ 提交失败：{type(e).__name__}: {e}")
+            elif proposal_id and not submit:
+                print("     （未提交网关：加 `--submit` 才会推到审批/执行 ✅）")
+
+    if save:
+        from hub.agent.handle import save as save_run
+        try:
+            run_id = save_run(r, proposal_id=proposal_id)
+            print(f"\n  已落库：agent_run {run_id}　总耗时 {dt:.1f}s")
+            if proposal_id:
+                print(f"  对应提案：{proposal_id}（在 hub status / today 里能看到）")
+        except Exception as e:              # noqa: BLE001
+            # 落库失败不影响结论（和 hub eval 的处理一致）
+            print(f"\n  ⚠️ 落库失败（不影响结论）：{type(e).__name__}: {e}")
+
+    if r.needs_human:
+        return 2                          # 非零：让脚本能判"需要人来"
+    return 0
 
 
 def main() -> None:
@@ -525,6 +751,23 @@ def main() -> None:
 
     sub.add_parser("status", help="M8：业务数据现状（运营看）")
     sub.add_parser("today", help="M10：今天该做什么（运营第一眼）")
+
+    # ---- M3 阶段 3：受限 agent（形态 ③）----
+    hd = sub.add_parser("handle", help="阶段3：让 agent 处理一个问题簇（形态③：步骤代码定，模型只判断）")
+    hd.add_argument("cluster_id", nargs="?", default=None,
+                    help="问题簇 UUID 或前 8 位前缀。**不带参数则列出可选的簇**")
+    hd.add_argument("--no-save", action="store_true", help="只打印，不落 agent_run 表")
+    hd.add_argument("--adopt", action="store_true",
+                    help="采纳 agent 的结论 → 生成正式提案（**参数由代码构造，不让模型填**）")
+    hd.add_argument("--submit", action="store_true",
+                    help="采纳后**立即提交网关**（L2/L3 仍只转审批/工单，不会自动执行）")
+    hd.add_argument("--critic", action="store_true",
+                    help="额外跑一次 Critic 独立核对（多一次 LLM 调用，约 +3 秒）")
+    hd.add_argument("--no-rule", action="store_true",
+                    help="**对照实验用**：不把业务规则注入 prompt（测模型自己的判断）")
+    hd.add_argument("--role", default="operator", choices=["operator", "supervisor", "system"],
+                    help="以谁的身份调工具（默认 operator。**不要用 system** —— 会绕过 L2/L3 审批）")
+
     hp = sub.add_parser("health", help="M8：最近一次运行的健康度（工程看）")
     hp.add_argument("--id", dest="health_trace", default=None,
                     help="指定 trace_id（默认取最近一次全链）")
@@ -560,6 +803,13 @@ def main() -> None:
     ev = sub.add_parser("eval", help="M8：跑离线评估套件（有退出码，可接 CI）")
     ev.add_argument("--suite", default="perturbation_v1", help="用例集名（suites/<name>.yaml）")
     ev.add_argument("--strict", action="store_true", help="软门禁也要求 100%")
+    ev.add_argument("--no-save", action="store_true",
+                    help="不落库（临时跑一遍时用；默认会写 eval_case + eval_result）")
+    ev.add_argument("--history", action="store_true",
+                    help="不跑评测，只看历史（阶段 2.1：回答'门禁是不是在退化'）")
+    ev.add_argument("--reset-history", action="store_true",
+                    help="清空评测历史（只在发现坏记录时用）")
+    ev.add_argument("--limit", type=int, default=10, help="--history 看多少次")
 
     args = parser.parse_args()
 
@@ -600,6 +850,10 @@ def main() -> None:
         cmd_status()
     elif args.cmd == "today":
         cmd_today()
+    elif args.cmd == "handle":
+        cmd_handle(args.cluster_id, save=not args.no_save, role=args.role,
+                   adopt=args.adopt, submit=args.submit, critic=args.critic,
+                   use_rule=not args.no_rule)
     elif args.cmd == "health":
         cmd_health(getattr(args, "health_trace", None))
     elif args.cmd == "retro":
@@ -611,7 +865,9 @@ def main() -> None:
         #    `sys.stdout.reconfigure(...)` 变成"引用前赋值"→ UnboundLocalError。
         #    （实测踩过；pyflakes 报的是 "local variable 'sys' referenced before
         #      assignment"，不是 "undefined name"，所以只过滤 undefined name 会漏。）
-        sys.exit(cmd_eval(args.suite, strict=args.strict))
+        if args.history:
+            sys.exit(cmd_eval_history(limit=args.limit, reset=args.reset_history))
+        sys.exit(cmd_eval(args.suite, strict=args.strict, save=not args.no_save))
     elif args.cmd == "enqueue":
         from hub.queue.commands import enqueue
         sys.exit(enqueue())

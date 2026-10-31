@@ -417,8 +417,13 @@ class ToolExecution(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
                                      server_default=text("gen_random_uuid()"))
-    proposal_id: Mapped[UUID] = mapped_column(
-        ForeignKey("action_proposal.id", ondelete="CASCADE"), nullable=False)
+    # ⚠️ **可空**（2026-10-31 改）：不是所有执行都来自提案 ✅
+    #    原来的假设是"一切工具调用都由某个提案发起" ——
+    #    但**外部调用方**（MCP server、未来的 REST API）没有提案 ✅
+    #    实测踩过：MCP 第一次调工具就撞 `NotNullViolation` ✅ ✗
+    #    语义：NULL = "不是由提案发起的直接调用"（审计靠 trace_id + tool_name 定位）
+    proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("action_proposal.id", ondelete="CASCADE"), nullable=True)
     trace_id: Mapped[str] = mapped_column(Text, nullable=False)
     tool_name: Mapped[str] = mapped_column(Text, nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
@@ -610,6 +615,62 @@ class SalesDaily(Base):
         Index("idx_sales_date", "stat_date"),
         CheckConstraint("conversion IS NULL OR (conversion >= 0 AND conversion <= 1)",
                         name="ck_sales_conversion"),
+    )
+
+
+class AgentRun(Base):
+    """一次 agent 任务（阶段 3.4）。
+
+    和 `analysis_run` 的区别：
+        `analysis_run`  = "跑了一次批处理/分析"（一个模块的一次执行）
+        `agent_run`     = "**一个具体任务**交给了 agent"（比如"处理簇 X"）
+        → 后者有轨迹（steps）、有成本、有"要不要人工"的结论 ✅
+
+    为什么单独建表而不是塞 `analysis_run.stats`：
+        轨迹是**一对多**（一次任务 N 步）✅
+        塞进 JSONB 后就没法"按步查询/按步统计"了 ✅
+        （而阶段 3.5 的轨迹评测正要按步算 ✅）
+
+    并发与幂等（`docs/改进路线图.md` §7.4）：
+        同一 `cluster_id` 只允许一个未完成任务 —— 靠下面的部分唯一索引 ✅
+        否则两个运营同时点"让 AI 出方案" = 跑两次、烧两份钱 ✅
+    """
+    __tablename__ = "agent_run"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True,
+                                     server_default=text("gen_random_uuid()"))
+    cluster_id: Mapped[UUID] = mapped_column(
+        ForeignKey("issue_cluster.id", ondelete="CASCADE"), nullable=False)
+    # 贯穿的链路 ID（让 hub trace 能查到这次 agent 的每一步）
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # 谁发起的（operator / supervisor）—— **不是 system** ✅
+    # 为什么：agent 是新调用方，不是新权限；用 system 会绕过 L2/L3 审批
+    actor_role: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'operator'"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'RUNNING'"))
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    # 轨迹：每步 {step, tool, args, ok, chars, ms}
+    steps: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # 证据：每条 {source, ref, text}（**每条都能追溯**，供 Critic 核对）
+    evidence: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # 结论：{recommendation, tool, confidence, needs_human}
+    result: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    tokens_in: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 采纳后回填（决策 #23：agent 结论要能一键生成提案）
+    proposal_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('RUNNING','DONE','NEEDS_HUMAN','FAILED')",
+                        name="ck_agent_status"),
+        # 同一簇只允许一个未完成任务（并发/幂等）——
+        # 重复提交时返回已有的 id，而不是再跑一遍 ✅
+        Index("uq_agent_running_cluster", "cluster_id", unique=True,
+              postgresql_where=text("status IN ('RUNNING','NEEDS_HUMAN')")),
+        Index("idx_agent_trace", "trace_id"),
     )
 
 

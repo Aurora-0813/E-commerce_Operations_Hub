@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
 """
+# PLANNED: 阶段 3.5（Case RAG）—— 本模块目前**没有任何业务代码 import**。
+
+它是唯一一个"保留但未启用"的契约模块，因为：
+    `CaseAugmentedSuggestion.check_citations` 定义的是"**引用必须落地校验**"
+    —— 那是反幻觉第四道防线的契约，阶段 3.5 会真的用上。
+
+在此之前它不参与运行时。`tests/check_contracts.py` 会检查：
+每个契约模块要么被 import，要么在这里标了 `PLANNED: 阶段 X`。
+
 案例契约（case.py）
 =================
 对应 Case RAG（设计文档 §3.4.5）：检索历史处置案例，给新问题生成建议。
 
-和 retro.py 的关系：复盘结论（POSITIVE/NEGATIVE）沉淀成 CaseEntry，供检索复用。
+和复盘结论的关系：`action_outcome` 里 POSITIVE/NEGATIVE 的结论沉淀成 CaseEntry，
+供新提案检索复用（**INCONCLUSIVE 不进案例库** —— 结论不明的不该当先例）。
     - CaseEntry                   一条历史案例（只收录结论明确的）
     - RetrievedCase               检索命中的案例（比 CaseEntry 多检索得分）
     - CaseAugmentedSuggestion     基于历史案例生成的建议

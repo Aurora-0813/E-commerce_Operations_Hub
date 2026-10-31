@@ -51,9 +51,24 @@ def main() -> None:
 
     # 3. 更新状态
     print("\n=== 3. 更新状态为 DONE ===")
-    repo.update_status(trace_id, "DONE", stats={"steps": 7, "tokens": 12000})
+    # ⚠️ `module` 必填（阶段 2.6）：`_latest_stats()` 按 stats["module"] 过滤，
+    #    缺了它这条记录就永远查不到。这个测试原来没写，被新守门拦下来了 ✅
+    from hub.contracts.runstats import RunStats
+    repo.update_status(
+        trace_id, "DONE",
+        stats=RunStats(module="PIPELINE", counts={"steps": 7}, metrics={"tokens": 12000}).to_jsonb(),
+    )
     run = repo.get(trace_id)
     print(f"✅ 更新成功：status={run.status} stats={run.stats} 结束时间={run.finished_at}")
+
+    # 4. 守门：缺 module 的 stats 必须被拒绝（阶段 2.6 的负向用例）
+    print("\n=== 4. 守门：缺 module 必须报错 ===")
+    try:
+        repo.update_status(trace_id, "DONE", stats={"steps": 1})
+        print("❌ 缺 module 居然没报错（守门失效）")
+        return 1
+    except ValueError as e:
+        print(f"✅ 已拒绝：{str(e)[:80]}")
 
     print("\n存储层验证结束。把输出贴给我。")
 

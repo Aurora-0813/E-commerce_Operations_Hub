@@ -263,6 +263,31 @@ def main() -> None:
                 check("L3 真的没有改价格", str(row.price_ref) == price_before,
                       f"仍为 {row.price_ref}")
 
+    # ---------- ⑨b 幂等的反例：不幂等的工具不能重放 ----------
+    # 2026-10-31 补：`ToolSpec.idempotent` 原来**从来没被读过** ✅ ✗
+    #   ⑨ 只测了"幂等该生效时生效"（idempotent=True 的工具）；
+    #   没测"不该生效时不生效"（idempotent=False 的工具）
+    #   → 于是这个字段形同虚设，只读工具也被永久缓存 ✅
+    # **反例这一条，才能证明字段真的被读了** ✅
+    print("\n=== ⑨b 不幂等的工具不能重放（反例）===")
+    from hub.tools.spec import get as _get_spec
+    spec_q = _get_spec("query_cluster")
+    check("query_cluster 声明了 idempotent=False",
+          spec_q is not None and spec_q.idempotent is False,
+          f"idempotent={getattr(spec_q, 'idempotent', None)}")
+    if spec_q is not None and spec_q.idempotent is False:
+        LIMITER.reset()                       # 避免撞频控
+        call_q = ToolCall(tool_name="query_cluster",
+                          args={"cluster_id": cluster_id}, evidence_refs={})
+        ctx_q = CallContext(role="operator", trace_id="gw-test-9b")
+        r1 = invoke(call_q, ctx_q)
+        r2 = invoke(call_q, ctx_q)            # 同参数再调一次
+        check("第一次 EXECUTED", r1.decision == Decision.EXECUTED, r1.brief())
+        check("第二次也是 EXECUTED（**不是** REPLAYED）",
+              r2.decision == Decision.EXECUTED, r2.brief())
+        check("两次 execution_id 不同（各自记了审计）",
+              r1.execution_id != r2.execution_id)
+
     # ---------- ⑫ 频控 ----------
     print("\n=== ⑫ 频控 ===")
     LIMITER.reset()

@@ -175,6 +175,20 @@ def run_clustering(
             if name != "未命名":
                 stats.named += 1
 
+            # ✅ 已核实：**这里不用改**（债台账 #39 的结论在 2026-10-31 被推翻）
+            #
+            # 原来以为 bug：`business_domain` 存的是商品类目（女装/男装），
+            #               而不是问题域（quality/logistics）。
+            # 核实后：`contracts/analysis.py` 的字段注释写的是
+            #         `business_domain: str  # 业务域（如"女装/连衣裙"）`
+            #         → **品类就是设计本意** ✅ 代码是对的 ✅
+            #
+            # 真正的缺口是另一件事：**`issue_cluster` 没有"问题类型"这一列** ——
+            #   因为一个簇可能跨多个问题类型（聚类是按文本相似度，不按 topic 分组），
+            #   所以设计时刻意没加 ✅
+            #   → 需要"问题类型"时，从 `cluster_member → review_topic.topic` 取众数
+            #     （`scripts/probe_planning.py::load_tasks` 有现成写法 ✅
+            #       阶段 3.1 的 `query_cluster` 也照它做 ✅）
             cats = [rows[i].category for i in group if rows[i].category]
             domain = Counter(cats).most_common(1)[0][0] if cats else "未知"
             platforms = sorted({rows[i].platform for i in group})

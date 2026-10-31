@@ -1,0 +1,46 @@
+# ============================================================
+# .gitattributes —— 让 git 知道"哪些是二进制、哪些必须 LF"
+# ============================================================
+# 为什么需要（债台账 #16 / 阶段 2.8）：
+#   data/mock/*.xlsx 是二进制，但 git 默认按文本处理 ——
+#   · `git diff` 会把它们当文本比，输出一堆乱码般的差异
+#   · 换行转换（autocrlf）理论上可能改写二进制内容
+#   · `git diff --stat` 显示的"改动行数"毫无意义
+# 标成 binary 后：git 不再尝试 diff 内容，只显示"Binary files differ"。
+# ============================================================
+
+# ---------- Office 文件（mock 数据）----------
+*.xlsx  binary
+*.xls   binary
+*.docx  binary
+*.pptx  binary
+*.pdf   binary
+
+# ---------- 图片 ----------
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+
+# ---------- Python 源码：统一 LF ----------
+# 为什么重要：
+#   如果仓库里混着 CRLF 和 LF，`run_tests.py` 读文件、`grep` 匹配、
+#   以及 .py 的 shebang 都可能出问题。锁定 LF 就不会随平台漂移。
+*.py    text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.txt   text eol=lf
+*.sql   text eol=lf
+
+# ---------- PowerShell 脚本：必须 CRLF ----------
+# 为什么单独列：PowerShell 5.1 对 LF 结尾的 .ps1 在个别情况下会解析异常
+# （尤其是 here-string 和续行符）。Windows 上跑的东西保持 CRLF 更稳。
+*.ps1   text eol=crlf
+
+# ---------- 其他 ----------
+*.zip   binary
+*.gz    binary

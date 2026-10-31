@@ -117,7 +117,19 @@ def main() -> None:
     import hub.cli
     orig_p0 = hub.cli.cmd_p0
 
+    # ⚠️ 这里注入故障靠的是"替换 hub.cli.cmd_p0"——
+    #    它只在 worker **函数内 import** 时才生效。
+    #    万一以后有人把 worker 里的 import 提到模块顶部，
+    #    worker 会持有直接引用，这个替换就【失效】了。
+    #
+    #    失效的后果有两种，只防第二种：
+    #      · 真的 ingest 跑起来 → 后面的断言（状态 QUEUED）会红 ✅ 能发现
+    #      · 真的 ingest **恰好也失败** → 断言仍绿，但**测的已经不是故障注入** ✅ ✗
+    #    → 所以必须直接验证"注入的函数真的被调用了"（下面第 ④b 条）
+    called: list[int] = []
+
     def boom(*a, **k):
+        called.append(1)
         raise RuntimeError("注入故障：导入失败")
 
     hub.cli.cmd_p0 = boom
@@ -129,6 +141,8 @@ def main() -> None:
     check("断点没前进（ingest 没成功）", stage is None, f"stage={stage}")
     check("进了延迟队列", q.queue_stats(r)["delayed"] == 1,
           f"delayed={q.queue_stats(r)['delayed']}")
+    # ④b：**证明故障注入真的生效了**（防"patch 失效但测试仍绿"的假绿）
+    check("注入的故障函数真的被调用过", len(called) >= 1, f"调用 {len(called)} 次")
 
     # ---------- ⑤ 重试超限 → 死信 ----------
     print("\n=== ⑤ 重试超限 → 死信 ===")

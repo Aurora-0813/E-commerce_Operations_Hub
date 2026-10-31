@@ -255,8 +255,17 @@ def _verify_update_price(args: dict, ctx: CallContext, result: dict) -> VerifyRe
 # ==================== 注册 ====================
 
 def register_all() -> None:
-    """注册全部内置工具（幂等：重复调用不会报错）。"""
+    """注册全部内置工具（幂等：重复调用不会报错）。
+
+    分两类：
+        · 写工具（改描述/改价/发回复）—— 有回查、补偿、审批，在本文件
+        · **只读工具**（阶段 3.1，给 agent 查数据层用）—— 在 `readonly.py`
+    """
     from hub.tools.spec import get as _get
+
+    # 只读工具先注册（它自己也是幂等的）—— agent 依赖它们
+    from hub.tools.readonly import register_readonly
+    register_readonly()
 
     if _get("catalog.query_price"):
         return

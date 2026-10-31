@@ -121,6 +121,27 @@ class QueueConf(BaseModel):
     claim_interval_s: int = 60         # 每 60 秒扫一次 PEL
 
 
+class CloudConf(BaseModel):
+    """云端模型的数据外发策略（阶段 1.2）。
+
+    为什么要有这个开关：
+        项目的卖点之一是"用户数据不出网"。但上云能显著提升能力，
+        所以要有一条**显式、可审计**的规则 —— 而不是"开发者想发就发"。
+
+    三条铁律（docs/改进路线图.md §二）：
+        ① 图片永不出网             → 由 `hub/multimodal/vision.py` 硬编码只连本地保证
+        ② 评价原文默认不出网       → `allow_text` 默认 False
+        ③ 聚合统计可上云           → `allow_aggregate` 默认 True（只有数字，不可识别到人）
+
+    注意：这只防"误发"，不防"故意发" —— 真正的合规要靠法务和平台条款。
+    """
+
+    allow_text: bool = False       # 是否允许把【评价原文】发给云端。默认关。
+    allow_aggregate: bool = True   # 是否允许把【聚合数字】发给云端（如 brief）
+    redact_pii: bool = True        # 原文上云前是否做二次 PII 脱敏（allow_text=True 时才生效）
+    max_tokens_per_run: int = 200_000   # 单次运行上云的 token 上限（防"跑飞烧钱"）
+
+
 class Settings(BaseSettings):
     """
     总配置：把上面几个"分组"合并成一个总的 Settings 对象。
@@ -144,3 +165,4 @@ class Settings(BaseSettings):
     dqe: DqeConf = DqeConf()
     gateway: GatewayConf = GatewayConf()
     queue: QueueConf = QueueConf()    # M7 调度（Redis Stream）
+    cloud: CloudConf = CloudConf()    # 数据外发策略（阶段 1.2）

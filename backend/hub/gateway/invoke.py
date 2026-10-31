@@ -103,10 +103,17 @@ def _invoke_inner(call: ToolCall, ctx: CallContext, *, approved: bool = False) -
         return _reject(call, ctx, e.code, e.detail, t0)
 
     # ---------- ③ 幂等（查询）----------
-    key = idem_key(spec, args, ctx)
-    prev_execution = idem_lookup(key)
-    if prev_execution:
-        return _replay(call, ctx, spec, prev_execution, t0)
+    # ⚠️ **必须看 `spec.idempotent`**（2026-10-31 修的真 bug）：
+    #    原来这里**无条件**算 key + 查 + 重放 ✅ → `idempotent` 字段形同虚设 ✅ ✗
+    #    而幂等是【写】操作的概念（防重复改价/发回复）✅
+    #    套到【读】上 = 永久缓存查询 → 读到旧数据 ✅ ✗
+    #    （实测：MCP 重复调 query_cluster 返回 REPLAYED，数据是上次的 ✅）
+    #    现在：idempotent=False 时 key 为空串，跳过查询/占位/重放 ✅
+    key = idem_key(spec, args, ctx) if spec.idempotent else ""
+    if key:
+        prev_execution = idem_lookup(key)
+        if prev_execution:
+            return _replay(call, ctx, spec, prev_execution, t0)
 
     # ---------- ④ 频控 ----------
     if not LIMITER.acquire(f"{ctx.tenant_id}:{spec.name}"):
@@ -147,10 +154,14 @@ def _effective_risk(declared: str, floor: str | None) -> str:
 
 def _execute(call: ToolCall, ctx: CallContext, spec, args: dict,
              key: str, t0: float) -> GatewayResult:
-    """L0/L1（或已批准的 L2/L3）：占位 → 执行（带重试）→ 回查 → 失败补偿 → 审计。"""
+    """L0/L1（或已批准的 L2/L3）：占位 → 执行（带重试）→ 回查 → 失败补偿 → 审计。
+
+    `key` 为空串表示**不做幂等**（`spec.idempotent=False`，比如只读查询 ✅）
+    —— 那就跳过"占位"这一步，直接执行 ✅
+    """
     execution_id = _start_execution(call, ctx, args)
 
-    if not idem_claim(key, spec, execution_id):
+    if key and not idem_claim(key, spec, execution_id):
         _delete_execution(execution_id)
         prev = idem_lookup(idem_key(spec, args, ctx))
         if prev:
@@ -391,10 +402,27 @@ def _reject(call: ToolCall, ctx: CallContext, code: str, detail: dict,
 # ==================== 审计（tool_execution） ====================
 
 def _start_execution(call: ToolCall, ctx: CallContext, args: dict) -> str:
-    """建一条 RUNNING 的执行记录，返回 id。"""
+    """建一条 RUNNING 的执行记录，返回 id。
+
+    ⚠️ `proposal_id` 是**可空**的（`ToolCall` 的 docstring 写着"来自哪个提案，可空"），
+       但这里原来是 `UUID(call.proposal_id)` —— 传空串会 ValueError ✅ ✗
+       （实测 2026-10-31：MCP 是第一个"不传 proposal_id"的调用方，立刻崩了 ✅）
+
+    为什么以前没暴露：`hub propose` / `hub eval` 都带 proposal_id ✅
+       → **只有新调用方才发现** —— 这就是"多一个调用方就多一种路径" ✅
+    """
+    pid = None
+    if call.proposal_id:
+        try:
+            pid = UUID(str(call.proposal_id))
+        except (ValueError, AttributeError):
+            # 不是合法 UUID → **按"没有提案"处理**，不要让审计写入失败
+            # （审计失败会掩盖真正的工具调用结果 ✅）
+            pid = None
+
     with get_session() as s:
         row = ToolExecution(
-            proposal_id=UUID(call.proposal_id),
+            proposal_id=pid,
             trace_id=ctx.trace_id or "no-trace",
             tool_name=call.tool_name,
             attempt=1,

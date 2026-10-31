@@ -12,7 +12,7 @@ M7 的四个命令（commands.py）
 import uuid
 
 from hub.persistence.db import get_session
-from hub.persistence.models import PipelineRun
+from hub.persistence.models import PipelineRun, TraceSpan
 from hub.queue import client as q
 from hub.queue.stages import STAGES, total_est_s
 
@@ -63,6 +63,9 @@ def enqueue(kind: str = "full", params: dict | None = None) -> int:
     # 清理：只保留最近 50 条【已结束】的链，避免 pipeline_run 无限增长
     # （每天一条 + 回填，一年就是几百条；旧的不删，`hub queue` 的列表会越来越长）
     _prune_old_runs(keep=50)
+    # 顺手清理 trace_span（阶段 2.4）—— 每次全链写 ~200 行 span，
+    # 一年下来 7 万行 + 每行带 JSONB。不清的话磁盘和查询都会慢慢变差。
+    _prune_old_traces(keep=200)
 
     print(f"✅ 已入队")
     print(f"   链 ID    {run_id}")
@@ -94,8 +97,42 @@ def _prune_old_runs(keep: int = 50) -> int:
     return len(old)
 
 
-# ==================== worker ====================
+def _prune_old_traces(keep: int = 200) -> int:
+    """删掉太旧的 trace（阶段 2.4）。
 
+    **为什么单独清 `trace_span`**：`_prune_old_runs` 只管 `pipeline_run` ✅，
+    但一次全链会在 `trace_span` 里写 ~200 行（每个阶段 + 每次 LLM 调用一条），
+    而且每行带一个 JSONB `attrs`。
+       → 日跑一年 ≈ 7 万行；表不会报错，但 `hub trace` 会越来越慢 ✅
+       → 这类问题**不会响**，只会在某天"突然很慢"时被发现 ✅
+
+    **按 trace_id 整体删**（不是按 span 行删）—— 否则会留下"半个 trace"，
+    而 `hub trace` 打印调用树时遇到缺失的 parent 会难看 ✅
+
+    **和 `_prune_old_runs` 不同：这里不看状态** ——
+    span 是"已经发生的事实"，没有"未完成"的概念 ✅
+    （没写完的 trace 只是少几行，不影响保留逻辑）
+
+    :return: 删掉了多少个 trace（不是多少行）
+    """
+    from sqlalchemy import delete, func, select
+
+    with get_session() as s:
+        # 按"该 trace 最早一条 span 的时间"排序，取最近 keep 个 trace_id
+        recent = s.execute(
+            select(TraceSpan.trace_id, func.min(TraceSpan.start_ts).label("t"))
+            .group_by(TraceSpan.trace_id)
+            .order_by(func.min(TraceSpan.start_ts).desc())
+        ).all()
+        old_ids = [tid for tid, _t in recent[keep:]]
+        if not old_ids:
+            return 0
+        s.execute(delete(TraceSpan).where(TraceSpan.trace_id.in_(old_ids)))
+        s.commit()
+    return len(old_ids)
+
+
+# ==================== worker ====================
 def worker(once: bool = False, idle: int | None = None) -> int:
     """worker 命令入口。
 

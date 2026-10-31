@@ -65,5 +65,16 @@ def run_skeleton(trace_id: str, batch_id, tenant_id: str = "default") -> Pipelin
         raise
 
     # 3. 全部完成：状态置 DONE，记录统计
-    repo.update_status(trace_id, "DONE", stats={"steps": len(STEPS)})
+    #
+    # ⚠️ `module` 必填（阶段 2.6）：
+    #   原来这里写的是 `{"steps": len(STEPS)}`，**没有 module** ✅
+    #   → `health.py::_latest_stats()` 按 `stats["module"]` 过滤，
+    #     所以"跑一次全链"的统计**从来没被 hub health 读到过** ✅ ✗
+    #   → 现在补上；`update_status` 也会在缺 module 时直接报错，防止再犯。
+    from hub.contracts.runstats import RunStats
+
+    repo.update_status(
+        trace_id, "DONE",
+        stats=RunStats(module="PIPELINE", counts={"steps": len(STEPS)}).to_jsonb(),
+    )
     return state

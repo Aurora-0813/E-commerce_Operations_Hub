@@ -1,48 +1,70 @@
-# ============ 核心依赖 ============
-pydantic>=2.5              # 契约层（全项目唯一真相）
-pydantic-settings          # 配置
-pandas                     # 数据处理
-pyarrow                    # parquet 列式存储
-openpyxl                   # 读写 xlsx
-numpy                      # 数值
-
-# ============ 小模型（DQE）============
-scikit-learn               # TF-IDF+LR / 孤立森林
-joblib                     # 模型序列化
-jieba                      # 中文分词
-
-# ============ LLM / Agent（M3）============
-langgraph                  # 编排（状态机 + checkpointer）
-langchain-openai           # LLM 客户端（OpenAI 兼容，可换）
-
-# ============ 存储 / 队列 ============
-sqlalchemy>=2.0            # ORM（dev 用 SQLite）
-alembic                    # 迁移
-psycopg[binary]            # PG 驱动（生产才需要，dev 可不装）
-redis                      # M7 队列
-fakeredis                  # dev 测试用内存 Redis
-
-# ============ 多模态（M2）============
-pillow                     # 图片处理
-imagehash                  # pHash
-
-# ============ 工程 ============
-tenacity                   # 重试
-structlog                  # 结构化日志
-python-dotenv              # 环境变量
-pyyaml                     # M8 评估用例集（suites/*.yaml）
-
-# ============ 测试 ============
-pytest
-pytest-asyncio
-httpx
-
-# ============ 代码检查 ============
-# pyflakes：查"未定义的名字"。
+# ============================================================
+# 依赖清单
+# ============================================================
+# **只列真正 import 的包**。每一条都要能说出"在哪一行用到"。
 #
-# 为什么单独列出来：`compileall` 只查语法，查不出 `select(...)` 里 select 没 import
-# 这类错误（语法完全合法，跑到那行才 NameError）。
-# 实测踩过两次（hub trace 不带 id、worker 崩溃恢复的续租），
-# 而且都藏在"正常路径不会走"的分支里，测试还假绿。
-# `scripts/run_all.py` 的第 0 步会用它，只让 undefined name 挡路。
+# 为什么这么严：
+#   之前这份文件按"设计"写的，列了 pandas/pyarrow/langgraph/tenacity/structlog
+#   等 7 个包，实际一行都没 import —— 新人装几百 MB 无用包，
+#   而且 langgraph 的存在会让人误以为"用了 LangGraph"（当时确实没用）。
+#
+# 怎么核对：grep 一遍 import 再写，不要凭设计稿。
+# 将来才会用到的包，写在文件末尾的"计划新增"里，不要提前装。
+# ============================================================
+
+# ---------- 契约与配置 ----------
+pydantic>=2.5              # hub/contracts/*（契约层）
+pydantic-settings          # hub/core/settings.py（读 .env）
+python-dotenv              # pydantic-settings 解析 .env 时需要（不是直接 import）
+jsonschema                 # hub/action/proposer.py::_schema_error（提案写库前预校验工具参数）
+
+# ---------- 存储与迁移 ----------
+sqlalchemy>=2.0            # hub/persistence/*（ORM）
+alembic                    # backend/alembic/*（迁移）
+psycopg[binary]            # PostgreSQL 驱动（hub/core/settings 里的 postgresql+psycopg://）
+redis                      # hub/queue/*（M7 队列）
+
+# ---------- 数据处理 ----------
+openpyxl                   # hub/ingress/reader.py（读 xlsx）
+numpy                      # hub/analysis/cluster.py、hub/llm/embed.py
+scikit-learn               # TF-IDF / KMeans / SVD / cosine（M1 DQE 与 M4 聚类）
+joblib                     # hub/dqe/ml.py（模型序列化）
+jieba                      # hub/dqe/ml.py（中文分词）
+
+# ---------- 多模态 ----------
+pillow                     # hub/multimodal/{vision,sandbox,phash}.py（图片解码/重写）
+imagehash                  # hub/multimodal/phash.py（pHash 去重）
+
+# ---------- 评估与容错 ----------
+pyyaml                     # hub/eval/runner.py（读 suites/*.yaml）—— 注意是函数内 import
+
+# ---------- 代码检查 ----------
+# pyflakes：查"未定义的名字"。
+# compileall 只查语法，查不出 `select(...)` 里 select 没 import 这类错
+# （语法完全合法，跑到那行才 NameError）。实测踩过两次，而且都藏在
+# "正常路径不会走"的分支里，测试还假绿。scripts/run_all.py 第 0 步用它。
 pyflakes
+
+# ============================================================
+# 计划新增（到对应阶段再加，现在不装）
+# ============================================================
+# 阶段 3（agent）—— **已装**：
+langgraph>=1.2              # agent 图（阶段 3.3 的对照实现，不替代 M7 状态机）
+# ⚠️ `mcp` 必须带 `[cli]` extras：FastMCP 内部会 import typer，
+#    只装 `mcp` 会报 "typer is required. Install with 'pip install mcp[cli]'"
+#    （实测踩过 2026-10-31 ✅）
+mcp[cli]>=1.30              # MCP server（阶段 3.2：把工具按协议暴露给外部 agent）
+#
+# 阶段 4（认证 + API）：
+#   fastapi / uvicorn[standard]  # REST
+#   bcrypt                       # 密码哈希（app_user.password_hash）
+#   pyjwt                        # JWT
+#   httpx                        # API 测试（tests/check_api.py）
+#
+# 明确不用（写了理由，避免以后有人"顺手加上"）：
+#   pandas / pyarrow  —— 全程 openpyxl + 原生 list/dict 够用，加进来只是多 200MB
+#   tenacity          —— 重试是手写的（队列的延迟重试 + 指数退避），不需要再包一层
+#   structlog         —— 输出走 hub/core/ui.py（它还要处理 GBK 编码），不是标准 logging
+#   fakeredis         —— 测试用真 Redis（M7 的行为依赖 Lua 脚本和 XAUTOCLAIM，假的不算数）
+#   pytest            —— 所有测试是独立脚本（check_*.py），run_tests.py 用子进程跑，
+#                        不需要测试框架；等真需要 fixture 时再加
