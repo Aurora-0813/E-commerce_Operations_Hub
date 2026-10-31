@@ -58,6 +58,9 @@ class OpenAIText:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        # 最近一次调用的 token 用量 (prompt, completion) —— `chat()` 只返回文本，
+        # 调用方（如 agent 的预算检查）要读这个 ✅（2026-10-31 补）
+        self.last_usage: tuple[int, int] = (0, 0)
         self.timeout = timeout
         self.name = model
         # 出网策略（阶段 1.2）。None = 用默认（原文不许出网、聚合可出网）。
@@ -137,6 +140,12 @@ class OpenAIText:
             raw = self._post(f"{self.base_url}/chat/completions", payload)
 
             usage = raw.get("usage") or {}
+            # **把 token 用量留在实例上**（2026-10-31 补）：
+            #   `chat()` 只返回字符串 ✅ → 调用方拿不到 token ✅ ✗
+            #   而 agent 的 token 预算（路线图 §7.3）要用它 ✅
+            #   → 存一份 `last_usage`，调用方读它（**不改变 chat() 的签名** ✅）
+            self.last_usage = (int(usage.get("prompt_tokens") or 0),
+                               int(usage.get("completion_tokens") or 0))
             sp.add_tokens(usage.get("prompt_tokens"), usage.get("completion_tokens"))
 
             choices = raw.get("choices") or []

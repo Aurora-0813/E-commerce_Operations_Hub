@@ -631,6 +631,9 @@ def cmd_handle(cluster_id: str | None, *, save: bool = True, role: str = "operat
     verify = [e for e in r.evidence if e["ref"] == "E-VERIFY"]
     if verify:
         print(f"  校验：{verify[0]['text']}")
+    # 每步 token（路线图 §5.3 指标③）—— 真模型不返 usage 的话这里会显示 0/0 ✅
+    print(f"  token：in {r.tokens_in} / out {r.tokens_out}"
+          + ("　⚠️ 模型没返回 usage（或客户端没捕获）" if r.tokens_in == 0 else ""))
     # Critic 的结论单独展示（它是"第二个模型怎么看" ✅）
     crit = [e for e in r.evidence if e["ref"] == "E-CRITIC"]
     if crit:

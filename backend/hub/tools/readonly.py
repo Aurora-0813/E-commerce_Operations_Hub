@@ -109,6 +109,11 @@ def _query_cluster(args: dict, ctx: CallContext) -> dict:
             "business_domain": c.business_domain,   # 品类（女装/男装）—— 保留，它有用
             "topic": topic,                          # 问题类型（现算的）
             "spu_count": len(c.spu_ids or []),
+            # ⚠️ 也把**具体是哪些商品**返回（2026-10-31 补）：
+            #    `spu_count` 只说"有几个"，而 reflect 环要拿一个**真的 spu_id** 去查销售 ✅
+            #    （踩过：只有 count → reflect 拿不到 spu → 直接判"簇没有关联商品" ✅ ✗）
+            #    截断到 10 个：一个簇可能覆盖几十个商品，全给会把 prompt 撑爆 ✅
+            "spu_ids": list(c.spu_ids or [])[:10],
         }
 
 

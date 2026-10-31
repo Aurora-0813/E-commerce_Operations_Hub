@@ -59,6 +59,10 @@ GROUPS: dict[str, list[str]] = {
         "check_readonly_tools",  # 阶段 3.1：5 个只读工具（只读 + 截断 + 负向）
         "check_agent_handle",    # 阶段 3.4：agent 主路径（用假 LLM，不花钱）
         "check_mcp_server",      # 阶段 3.2：MCP server（经网关，L3 不执行）
+        "check_critic",          # 阶段 3.6：Critic（三类问题 + 不拦结论）
+        "check_agent_guard",     # 阶段 3.7：六项运行约束（步数/token/超时/并发/幂等/升级）
+        "check_agent_wiring",    # 阶段 3.7：**主路径真的用了它们吗**（防"函数写了没接线"）
+        "check_cloud_audit",     # 阶段 1.2/1.3：出云写 audit_log + 每步 token
         "check_normalize",       # 文本归一化
         "check_simhash",         # SimHash 去重
         "check_rules",           # DQE 规则

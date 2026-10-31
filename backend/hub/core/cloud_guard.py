@@ -107,6 +107,43 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
 
 
 # ---------------------------------------------------------------- 闸门
+def _audit_cloud(kind: str, text: str, hits: list) -> None:
+    """**每次出云写一条 `audit_log`**（路线图 §5.2 验收④）✅
+
+    为什么必须写：
+        "出网"是**不可逆**的动作 ✅（数据一旦发出去就收不回 ✅）
+        所以每一次都要留痕：**谁、什么类别、带了多少字、脱敏了几处** ✅
+    为什么 actor 先写 `system:cloud_guard`：
+        现在还没有登录体系 ✅ → 没有"真人"可写 ✅
+        **但不能因此就不记** —— 记 `system:cloud_guard` 是诚实的 ✅
+        （阶段 4 加了登录后，把 actor 换成 `user:<id>` 即可 ✅）
+
+    ⚠️ 审计失败**不能阻断业务**（一次 fail-open 比"因为写不进日志就发不出去"好）✅
+       但会在 stderr 打警告 ✅
+    """
+    import sys
+
+    try:
+        from hub.persistence.db import get_session
+        from hub.persistence.models import AuditLog
+
+        with get_session() as s:
+            s.add(AuditLog(
+                tenant_id="default",
+                # 阶段 4 之后换成 user:<id> ✅；现在诚实写"系统闸门"
+                actor="system:cloud_guard",
+                action="cloud.request",
+                resource=f"llm://{kind}",
+                detail={"kind": kind, "chars": len(text or ""),
+                        "redactions": len(hits or []),
+                        "redaction_kinds": sorted({h[0] for h in (hits or [])})},
+            ))
+            s.commit()
+    except Exception as e:                      # noqa: BLE001
+        print(f"[cloud_guard] ⚠️ 出云审计写入失败（不阻断业务）：{type(e).__name__}: {e}",
+              file=sys.stderr)
+
+
 def guard(base_url: str, kind: str, text: str, *,
           allow_text: bool = False,
           allow_aggregate: bool = True,
@@ -143,14 +180,17 @@ def guard(base_url: str, kind: str, text: str, *,
             )
         if do_redact:
             new, hits = redact_pii(text)
+            _audit_cloud(kind, new, hits)
             return GuardResult(kind=kind, is_cloud=True, allowed=True,
                                text=new, redactions=hits)
+        _audit_cloud(kind, text, [])
         return GuardResult(kind=kind, is_cloud=True, allowed=True,
                            text=text, redactions=[])
 
     if kind == KIND_AGGREGATE:
         if not allow_aggregate:
             raise CloudBlocked("聚合统计也被禁止上云（HUB_CLOUD__ALLOW_AGGREGATE=false）。")
+        _audit_cloud(kind, text, [])
         return GuardResult(kind=kind, is_cloud=True, allowed=True,
                            text=text, redactions=[])
 

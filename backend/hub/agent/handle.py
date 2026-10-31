@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 from hub.tools.readonly import (MAX_REVIEWS, _query_cluster, _query_history,
-                                _query_reviews)
+                                _query_outcome, _query_product, _query_reviews)
 from hub.tools.spec import CallContext
 
 # 模型只允许给这几类建议（封闭集合 → 可校验、可统计）
@@ -158,7 +158,8 @@ def _parse_judge(text: str) -> dict | None:
 
 def handle(cluster_id: str, *, actor_role: str = "operator",
            llm=None, ctx: CallContext | None = None,
-           use_rule: bool = True, use_critic: bool = False) -> HandleResult:
+           use_rule: bool = True, use_critic: bool = False,
+           reflect: bool = False, limits=None) -> HandleResult:
     """处理一个问题簇：查证据 → 模型判断 → 出方案。
 
     :param cluster_id: 簇 UUID（**由调用方给，不由模型生成**）
@@ -176,14 +177,25 @@ def handle(cluster_id: str, *, actor_role: str = "operator",
     from hub.tools.builtin import register_all
     register_all()
 
+    # ---------------- 0. 并发闸门（路线图 §7.4：全局并发上限 2）----------------
+    # **必须在调 LLM 之前**：超了就别开始，否则等于白烧一次 ✅
+    from hub.agent import guard as _g
+    limits = limits or _g.DEFAULT_LIMITS
+    _g.acquire_slot(limits)          # 超限会抛 BudgetExceeded，由调用方处理 ✅
+
     ctx = ctx or CallContext(role=actor_role, trace_id=f"agent-{uuid4().hex[:8]}")
     goal = f"处理问题簇 {cluster_id}：给出处置建议"
     res = HandleResult(cluster_id=cluster_id, goal=goal)
+    started_at = time.time()          # ← 超时/预算的计时起点（guard 用）
 
     handlers = {
         "query_cluster": _query_cluster,
         "query_reviews": _query_reviews,
         "query_history": _query_history,
+        # ⚠️ 下面两个是 **reflect 环**才用到的（第一版没有，加了 reflect 忘了注册 → KeyError ✅）
+        #    不注册也没报错，只会在 reflect 触发时崩 ✅
+        "query_product": _query_product,
+        "query_outcome": _query_outcome,
     }
 
     # ---------------- ①②③ 三步：参数全部由代码给 ----------------
@@ -221,21 +233,109 @@ def handle(cluster_id: str, *, actor_role: str = "operator",
     # ---------------- ④ 唯一一次模型调用（抽成共享函数，见 judge_step）----------------
     res = judge_step(res, llm, use_rule=use_rule)
 
+    # ---------------- ④b reflect：补一步证据再判一次（Plan-and-Execute 的 reflect 环）----------------
+    # 路线图 §7.3 要求"plan → act → observe → **reflect** →（回到 plan，≤3 步）"
+    # 第一版只做了线性 4 步 ✅ ✗ → 这里补上 ✅
+    # ⚠️ **有条件的**：只在 NEEDS_HUMAN（依据不足）+ 步数没用完 + 还有证据类型没查 时才补 ✅
+    #    无条件 reflect = 无限烧钱（7B 实测会用尽步数 ✅）
+    from hub.agent import guard as _g
+    limits = limits or _g.DEFAULT_LIMITS
+    if reflect and _g.should_reflect(res, limits):
+        try:
+            _g.check_deadline(started_at, limits)      # 超时就不补了 ✅
+            extra = sorted({"query_product", "query_outcome"}
+                           - {s.tool for s in res.steps if s.tool.startswith("query_")})[0]
+            # 补哪一步：**只有 query_product 一条路** ✅
+            # （`query_outcome` 要 proposal_id，agent 手上没有 → 调不通 ✅
+            #   所以"可补项"其实只有一个，第一版列了两个是错的 ✅ ✗）
+            extra = "query_product"
+            spu = (c.get("spu_ids") or [None])[0]
+            if not spu:
+                raise _g.BudgetExceeded("reflect 想查商品销售，但簇没有关联商品")
+            args = {"spu_id": spu}
+            try:
+                r2, s2 = _run_tool(extra, args, ctx, handlers)
+            except Exception as e:                 # noqa: BLE001
+                # 补证据失败**不该让整个任务崩** ✅ → 记一条证据，保持原判 ✅
+                # （这是 reflect 的正确语义：尽力补，补不到就按已有证据下结论 ✅）
+                res.evidence.append({"source": "reflect", "ref": "E-REFLECT",
+                                     "text": f"补充 {extra} 失败：{type(e).__name__}: {e}"})
+                r2, s2 = None, None
+            if s2 is not None:
+                s2.idx = len(res.steps) + 1
+                res.steps.append(s2)
+                res.evidence.append({"source": "query_product", "ref": "E-P",
+                                     "text": f"商品销售：{str(r2)[:200]}"})
+                # 补完证据 → **再判一次**（这才叫 reflect ✅）
+                res.evidence = [e for e in res.evidence
+                                if e["ref"] not in ("E-CRITIC", "E-VERIFY", "E-RULE")]
+                res = judge_step(res, llm, use_rule=use_rule)
+        except _g.BudgetExceeded as e:
+            res.status, res.needs_human = "FAILED", True
+            res.error = str(e)
+
+    # ---------------- ④c 预算检查（token / 超时）----------------
+    # 路线图 §7.3："停止：… token 超预算"、§7.4："超时 5 分钟"
+    try:
+        _g.check_deadline(started_at, limits)
+    except _g.BudgetExceeded as e:
+        res.status, res.needs_human = "FAILED", True
+        res.error = str(e)
+        res.evidence.append({"source": "guard", "ref": "E-GUARD", "text": str(e)})
+    if _g.token_exceeded(res.tokens_in, res.tokens_out, limits):
+        msg = (f"token 超预算：{res.tokens_in + res.tokens_out} > "
+               f"{limits.token_budget}")
+        res.status, res.needs_human = "FAILED", True
+        res.error = msg
+        res.evidence.append({"source": "guard", "ref": "E-GUARD", "text": msg})
+
     # ---------------- ⑤ Critic：第二个模型独立核对（默认关，`--critic` 开）----------------
     # **不默认开**的理由：它多一次 LLM 调用（3 秒 → 6 秒）✅
     # 而"什么时候值得多花那 3 秒"应该由人决定（比如 P0 簇、要提交的提案）✅
+    #
+    # 路线图 §7.3 的 HITL 停点之一：
+    #     "Critic 连续两次不通过 → 转人工 —— **不让人工被 LLM 卡死**" ✅
+    # 所以这里是个**有界重判循环**（不是"判一次就完"）：
+    #     WRONG 第 1 次 → 重判一次（reject_count=1 → continue ✅）
+    #     WRONG 第 2 次 → **转人工**（escalate ✅）
+    #     OK/WEAK/SKIP  → 不重判（WEAK 只是"可疑"，不计数 ✅）
+    # ⚠️ 循环必须有界：`critic_max_reject`（默认 2）✅ 否则 7B 能无限重判 ✅
     if use_critic and res.status == "DONE":
         from hub.agent.critic import critique as run_critic
-        c = run_critic(res, llm=llm)
-        res.critique = {"verdict": c.verdict, "problems": c.problems,
-                        "reason": c.reason, "ok": c.ok, "error": c.error}
-        res.evidence.append({
-            "source": "critic", "ref": "E-CRITIC",
-            "text": f"Critic：{c.verdict}"
-                    + (f"　问题：{'；'.join(c.problems)}" if c.problems else "")
-                    + (f"　理由：{c.reason}" if c.reason else "")
-                    + (f"　（解析失败：{c.error[:60]}）" if not c.ok else ""),
-        })
+        reject = 0
+        while True:
+            c = run_critic(res, llm=llm)
+            res.critique = {"verdict": c.verdict, "problems": c.problems,
+                            "reason": c.reason, "ok": c.ok, "error": c.error}
+            verdict = c.verdict
+            if verdict == "WRONG":
+                reject += 1
+            decision = _g.apply_critic_verdict(verdict, reject, limits)
+            if decision == "escalate":
+                msg = (f"Critic 连续 {reject} 次不通过（{c.reason}），"
+                       "转人工判断")
+                res.status, res.needs_human = "NEEDS_HUMAN", True
+                res.recommendation = f"（{msg}）{res.recommendation}"
+                res.evidence.append({"source": "critic", "ref": "E-CRITIC",
+                                     "text": msg})
+                break
+            if decision == "continue":
+                # 重判一次（**用同一套判据**，不是改 prompt 硬凑 ✅）
+                res.evidence = [e for e in res.evidence
+                                if e["ref"] not in ("E-CRITIC", "E-VERIFY", "E-RULE")]
+                res = judge_step(res, llm, use_rule=use_rule)
+                if res.status != "DONE":
+                    break          # 重判后变 NEEDS_HUMAN/FAILED → 不再纠缠 ✅
+                continue
+            # pass：把 Critic 的结论记成证据 ✅
+            res.evidence.append({
+                "source": "critic", "ref": "E-CRITIC",
+                "text": f"Critic：{verdict}"
+                        + (f"　问题：{'；'.join(c.problems)}" if c.problems else "")
+                        + (f"　理由：{c.reason}" if c.reason else "")
+                        + (f"　（解析失败：{c.error[:60]}）" if not c.ok else ""),
+            })
+            break
     return res
 
 
@@ -269,7 +369,11 @@ def judge_step(res: HandleResult, llm=None, *, use_rule: bool = True) -> HandleR
         + f"证据（**只能引用下面的编号**）：\n{evidence_text}\n\n"
         "请判断这些证据支持什么处置。"
     )
-    step = Step(idx=4, tool="llm.judge", args={"prompt_chars": len(prompt)}, ok=True)
+    # 步号**按已有步数推**，不写死 4 ✅
+    # （踩过：reflect / Critic 重判时会出现第二次 judge，
+    #   写死 idx=4 会让轨迹里出现两个"第4步"，`hub trace` 看起来像同一步 ✅）
+    step = Step(idx=len(res.steps) + 1, tool="llm.judge",
+                args={"prompt_chars": len(prompt)}, ok=True)
     t0 = time.time()
     try:
         raw = llm.chat(prompt, system=JUDGE_SYSTEM, temperature=0.0, max_tokens=300)
@@ -284,6 +388,15 @@ def judge_step(res: HandleResult, llm=None, *, use_rule: bool = True) -> HandleR
         res.status = "FAILED"
         res.error = f"模型调用失败：{type(e).__name__}: {e}"
         return res
+
+    # **累计 token 用量**（路线图 §7.3 的 token 预算要用它 ✅）
+    # 客户端把最近一次用量放在 `last_usage` ✅（chat() 只返回文本 ✅）
+    if hasattr(llm, "last_usage"):
+        ti, to = llm.last_usage
+        res.tokens_in += int(ti or 0)
+        res.tokens_out += int(to or 0)
+        step.args = dict(step.args or {}, tokens_in=int(ti or 0),
+                         tokens_out=int(to or 0))
 
     judged = _parse_judge(raw)
     if judged is None:
@@ -368,14 +481,30 @@ def judge_step(res: HandleResult, llm=None, *, use_rule: bool = True) -> HandleR
 def save(res: HandleResult, *, proposal_id: UUID | None = None) -> UUID:
     """把一次 agent 任务落库，返回 agent_run.id。
 
-    调用方（CLI / API）负责传 `proposal_id`（采纳后回填）。
+    **幂等**（路线图 §7.4："重复提交 → 返回已有 task_id" ✅）：
+        同一簇已有 `RUNNING` / `NEEDS_HUMAN` 的任务时 → **返回它的 id，不新建** ✅
+        为什么：`agent_run` 上有部分唯一索引
+        `UNIQUE (cluster_id) WHERE status IN ('RUNNING','NEEDS_HUMAN')` ✅
+        直接插入会抛 IntegrityError ✅ → 以前是崩，现在改成"返回已有的" ✅
+        **注意这是"幂等"不是"覆盖"**：已有的任务不会被新结果替换 ✅
+        （因为"已经有人在做"这件事本身是信息 —— 覆盖会让人以为只做了一次 ✅）
     """
+    from sqlalchemy.exc import IntegrityError
+
+    from hub.agent import guard as _g
     from hub.persistence.db import get_session
     from hub.persistence.models import AgentRun
 
+    cid = UUID(res.cluster_id)
     with get_session() as s:
+        # ---- 幂等：已有未完成任务 → 直接返回它 ✅ ----
+        # 只在**同状态下**复用：FAILED 的不算（失败的要能重跑 ✅）
+        existing = _g.find_running(cid)
+        if existing and res.status in ("RUNNING", "NEEDS_HUMAN"):
+            return UUID(existing)
+
         row = AgentRun(
-            cluster_id=UUID(res.cluster_id),
+            cluster_id=cid,
             trace_id=f"agent-{uuid4().hex[:8]}",
             actor_role="operator",
             status=res.status,
@@ -392,6 +521,14 @@ def save(res: HandleResult, *, proposal_id: UUID | None = None) -> UUID:
             error=res.error or None,
         )
         s.add(row)
-        s.commit()
+        try:
+            s.commit()
+        except IntegrityError:
+            # 并发下"先查后插"可能同时通过 → 唯一索引兜底 ✅
+            s.rollback()
+            again = _g.find_running(cid)
+            if again:
+                return UUID(again)
+            raise
         s.refresh(row)
         return row.id
