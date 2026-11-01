@@ -214,6 +214,24 @@ def create_app() -> FastAPI:
     # ---------- 写接口 · 批 5.3（通知/知识/导出/死信，5 个）----------
     from hub.api.write_misc import router as write_misc_router
     app.include_router(write_misc_router)
+    # ---------- 写接口 · 数据上传（2026-11-01 补的真缺口）----------
+    # 原来只能 `hub p0 <文件>` 命令行导入；42 条路由里**没有任何上传入口** ✅ ✗
+    from hub.api.write_ingest import router as write_ingest_router
+    app.include_router(write_ingest_router)
+
+    # ---------- OpenAPI 元数据（中文标题 / 分组说明 / 响应示例）----------
+    # 2026-11-01：`/api/docs` 原来全是英文标题（函数名自动生成）、没有返回结构
+    #   → 用一个**后处理器**统一补：改文案不用碰 43 个装饰器 ✅
+    # ⚠️ 只改**文档**，不影响任何请求行为 ✅
+    from hub.api.openapi_meta import apply_openapi
+    _base_openapi = app.openapi
+
+    def _openapi():
+        if not app.openapi_schema:
+            app.openapi_schema = apply_openapi(_base_openapi())
+        return app.openapi_schema
+
+    app.openapi = _openapi
 
     return app
 

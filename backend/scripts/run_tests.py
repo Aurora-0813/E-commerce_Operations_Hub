@@ -72,6 +72,7 @@ GROUPS: dict[str, list[str]] = {
         "check_api_write_action",  # 阶段 5.2：审批链（supervisor/confirm/拒绝必带原因）
         "check_api_write_misc",   # 阶段 5.3：通知已读/知识建发布/导出/死信重放
         "check_api_read_extra",  # 补：GET /notify（unread）+ GET /knowledge（effective）
+        "check_api_ingest",      # 补：POST /ingest（白名单/幂等/大小上限/平台传错）
         "check_retro_metrics",   # 阶段 3.4：refund_rate 只展示、不参与判定
         "check_case_rag",        # 阶段 3.5：检索/topic 过滤/伪造 case_id 丢弃
         "check_brief",           # 阶段 3.6：日报里编造的数字必须被丢弃

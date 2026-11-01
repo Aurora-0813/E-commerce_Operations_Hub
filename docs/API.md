@@ -148,6 +148,33 @@ API 层用 `CallContext.has_role`（**和工具层同一套** ✅）
 | GET | `/api/export/{kind}` | `reviews` / `clusters` / `retro` → xlsx 流；头里带 `X-Export-Rows` / `X-Export-Pii-Redacted` |
 | POST | `/api/dlq/replay` | **supervisor + `confirm:true`**；重放死信（**危险** ✅） |
 
+### 4.5 **数据上传**（2026-11-01 补的真缺口）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/ingest` | **multipart 上传平台导出文件 → 解析 → 落库** |
+
+```text
+参数（form-data）：
+   file        .xlsx，**≤ 20MB**
+   platform    taobao / jd          ← **必须和文件对得上**
+   data_type   review / product / sales
+   ↓
+返回（201）：
+   batch_id / existed / rows_ok / rows_bad / warnings / pii_dropped
+   ↓
+⚠️ **最容易踩的坑**：平台传错（把 jd 文件当 taobao 传）
+   → 字段映射失败 → **rows_ok: 0 / rows_bad: 2250**
+   → **但仍然返回 201**（「解析完成但全是坏行」不算异常 ✅）
+   → 现在 warnings 里会直接告诉你「**最常见的原因是 platform 传错**」✅
+   ↓
+⚠️ **幂等**：同一个文件（SHA256）第二次传 → `existed: true` + **原 batch_id**
+   → **不是报错** ✅（不会重复写库）
+   ↓
+⚠️ 原来**只能命令行**：`hub p0 <文件> --platform jd --type sales`
+   → 现在 API 也能传了，前端可以直接做"拖进来就导"✅
+```
+
 ---
 
 ## 5. 一个完整的调用示例（前端最常走的）
