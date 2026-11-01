@@ -63,6 +63,21 @@ GROUPS: dict[str, list[str]] = {
         "check_agent_guard",     # 阶段 3.7：六项运行约束（步数/token/超时/并发/幂等/升级）
         "check_agent_wiring",    # 阶段 3.7：**主路径真的用了它们吗**（防"函数写了没接线"）
         "check_cloud_audit",     # 阶段 1.2/1.3：出云写 audit_log + 每步 token
+        "check_api_auth",        # 阶段 4.1：登录/JWT/401/防枚举/签名/审计
+        "check_api_audit",       # 阶段 4.2：8 个 action 在业务层写 audit_log
+        "check_api_logout",      # 阶段 4.1：服务端登出（真撤销）+ 3 小时有效期
+        "check_api_read",        # 阶段 4.4a：8 个基础读接口（鉴权/分页/400/404）
+        "check_api_charts",      # 阶段 4.4b/c：13 个图表聚合 + agent 轨迹
+        "check_api_write_run",   # 阶段 5.1：POST /runs /handle（202/409/404）+ 状态查询
+        "check_api_write_action",  # 阶段 5.2：审批链（supervisor/confirm/拒绝必带原因）
+        "check_api_write_misc",   # 阶段 5.3：通知已读/知识建发布/导出/死信重放
+        "check_api_read_extra",  # 补：GET /notify（unread）+ GET /knowledge（effective）
+        "check_retro_metrics",   # 阶段 3.4：refund_rate 只展示、不参与判定
+        "check_case_rag",        # 阶段 3.5：检索/topic 过滤/伪造 case_id 丢弃
+        "check_brief",           # 阶段 3.6：日报里编造的数字必须被丢弃
+        "check_notify",          # 阶段 3.7：outbox 幂等/合并/重试上限/没配就 SKIPPED
+        "check_knowledge",       # 阶段 3.8：DRAFT 不生效/PUBLISHED 注入/hash 变/不覆盖规则
+        "check_report",          # 阶段 3.9：三种 xlsx 导出 + PII 复查 + 1 万行上限
         "check_normalize",       # 文本归一化
         "check_simhash",         # SimHash 去重
         "check_rules",           # DQE 规则

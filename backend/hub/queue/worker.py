@@ -89,6 +89,38 @@ def _release_gpu(r: redis.Redis) -> None:
 
 # ==================== 跑一条链 ====================
 
+def _process_handle(run_id: str, row, r: redis.Redis) -> str:
+    """跑一条 `kind="handle"` 的 agent 任务。
+
+    **结果写进 `agent_run`**（不是 `pipeline_run` ✅）：
+        `pipeline_run` 只记"这次任务排队/跑完/失败" ✅
+        `agent_run` 记"agent 的轨迹和结论" ✅（已经有 ✅）
+    → 前端轮询 `GET /api/handle/{agent_run_id}` ✅
+    """
+    from hub.agent.handle import handle, save
+
+    cid = (row.params or {}).get("cluster_id")
+    if not cid:
+        _update(run_id, status="DEAD", error="kind=handle 但 params 里没有 cluster_id")
+        return "SKIPPED"
+
+    _update(run_id, status="RUNNING", started_at=row.started_at or now(),
+            heartbeat_at=now(), attempt=(row.attempt or 0) + 1, error=None)
+    try:
+        res = handle(cid)
+        agent_run_id = save(res)
+        # 把 agent_run 的 id 写回 params → API 能靠 pipeline_run 找回结果 ✅
+        _update(run_id, status="DONE", finished_at=now(), heartbeat_at=now(),
+                params={**(row.params or {}), "agent_run_id": str(agent_run_id),
+                        "agent_status": res.status})
+        print(f"    [handle] 完成：{res.status}，agent_run={agent_run_id}")
+        return "DONE"
+    except Exception as e:                       # noqa: BLE001
+        # 往外抛 → 由调用方决定重试还是死信 ✅
+        _update(run_id, error=f"{type(e).__name__}: {e}"[:500])
+        raise
+
+
 def process(run_id: str, r: redis.Redis) -> str:
     """跑一条链。返回最终状态（DONE/DEGRADED/SKIPPED）。
 
@@ -106,6 +138,28 @@ def process(run_id: str, r: redis.Redis) -> str:
     if row.status == "DEAD":
         print("    [跳过] 这条链已进死信，需人工 replay")
         return "SKIPPED"
+
+    # ══════════════════════════════════════════════════════════════
+    #  阶段 5.0：kind="handle" —— agent 任务（**不走 M1~M11 管线** ✅）
+    # ══════════════════════════════════════════════════════════════
+    # 为什么把 agent 也放进这个队列（而不是 FastAPI BackgroundTasks）：
+    #   ① **进程内后台任务在 uvicorn 重启时会丢** ✅ ✗
+    #   ② 这个队列**已经有**：死信 + PEL 认领 + 超时对账 + 重试 ✅
+    #   ③ `PipelineRun.kind` 这一列早就有 ✅ → 不用新建表 ✅
+    # 区别：`full` 跑 40 分钟的管线；`handle` 跑 3~10 秒的 agent ✅
+    #      两者共用"排队/重试/死信"，但**不共用执行逻辑** ✅
+    # 为什么是 `startswith("handle")` 而不是 `== "handle"`：
+    #   `pipeline_run` 上有 **`uq_pipeline_run_active` UNIQUE(kind)**
+    #   （WHERE status IN (QUEUED,RUNNING)）✅
+    #   → "**同 kind 只能一条活跃**" ✅
+    #   → `kind="full"` 这样是对的（两条全链同时跑会打架 ✅）
+    #   但 `kind="handle"` 不对：不同簇的 agent 任务**应该能并行** ✅
+    #   → 所以 kind 编上簇 id：`handle:<cluster_id 前 8 位>` ✅
+    #     · 同一簇 → 只能一条（**这正是我们想要的幂等** ✅）
+    #     · 不同簇 → 各一条，能并行 ✅
+    #     · **不用改表/迁移**（索引是 UNIQUE(kind)，簇 id 自然区分了 ✅）
+    if str(getattr(row, "kind", "") or "").startswith("handle"):
+        return _process_handle(run_id, row, r)
 
     # 标记开始（对账器靠 heartbeat 判断"是不是卡死了"）
     _update(run_id, status="RUNNING", started_at=row.started_at or now(),

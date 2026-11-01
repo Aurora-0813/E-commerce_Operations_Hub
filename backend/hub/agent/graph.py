@@ -56,6 +56,10 @@ class GState(TypedDict, total=False):
     topic: str
     result: HandleResult
     failed: bool
+    # ⚠️ 注入的模型（测试用）——**必须声明在 GState 里** ✅
+    #    否则 LangGraph 的 state 合并会把它丢掉 ✅
+    #    （和阶段 3.3 那个"topic 被 state 合并丢了"是同一个坑 ✅）
+    _llm: object
 
 
 # ==================================================================== 节点

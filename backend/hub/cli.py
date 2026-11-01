@@ -372,6 +372,56 @@ def _print_sections(title: str, sections: list[tuple[str, list[tuple[str, str]]]
     print()
 
 
+def cmd_brief(*, save: bool = True, use_llm: bool = True) -> int:
+    """阶段 3.6：AI 日报。
+
+    **为什么这个能用云端**（路线图 §2.4）：
+        它的输入**全是聚合数字**（status 13 项 + health 7 项 + 今日 vs 昨天）✅
+        → CloudGuard 的 `KIND_AGGREGATE` 放行 ✅
+        → 不含评价原文、不含图片 ✅
+        → **是唯一"上云不违反三条铁律"的场景** ✅
+    """
+    from hub.brief import generate, latest, save as save_brief
+
+    if not use_llm:
+        ins = __import__("hub.brief", fromlist=["collect_inputs"]).collect_inputs()
+        print("=" * 66)
+        print("  日报输入（--no-llm：只显示输入，不调模型）")
+        print("=" * 66)
+        import json as _json
+        print(_json.dumps(ins, ensure_ascii=False, indent=2, default=str)[:3000])
+        return 0
+
+    r = generate()
+    print("=" * 66)
+    print("  AI 日报（阶段 3.6）")
+    print("=" * 66)
+    if r.error:
+        print(f"  ⚠️ 生成出错：{r.error}")
+    print(f"  尝试次数：{r.attempts}　通过 {len(r.lines)} 条　丢弃 {len(r.dropped)} 条")
+    print()
+    if r.lines:
+        for ln in r.lines:
+            print("  " + ln)
+    else:
+        print("  （没有通过校验的条目）")
+    if r.dropped:
+        print("\n  【被丢弃的（数字在输入里找不到）】")
+        for d in r.dropped[:5]:
+            print("  - " + d[:120])
+    if r.fallback_table:
+        print("\n  ⚠️ 退化成原始指标表（通过校验的条目不足 3 条 ✅ —— 不硬凑）")
+        import json as _json
+        print(_json.dumps(r.inputs, ensure_ascii=False, indent=2, default=str)[:1500])
+    if save:
+        try:
+            rid = save_brief(r)
+            print(f"\n  已落库：analysis_run {rid}（stats.module=brief）")
+        except Exception as e:                    # noqa: BLE001
+            print(f"\n  ⚠️ 落库失败（不影响输出）：{type(e).__name__}: {e}")
+    return 0
+
+
 def cmd_status() -> None:
     """M8：业务数据现状（运营看）。"""
     from hub.observability.status import collect
@@ -803,6 +853,12 @@ def main() -> None:
     dl.add_argument("--id", dest="run_id", required=True,
                     help="链 ID（hub queue --dlq 能看到前 8 位）")
 
+    # ---- 阶段 3.6：AI 日报 ✅
+    br = sub.add_parser("brief", help="阶段3.6：生成 AI 日报（3~5 条人话，数字必须能在输入里找到）")
+    br.add_argument("--no-save", action="store_true", help="只打印，不落 analysis_run")
+    br.add_argument("--no-llm", action="store_true",
+                    help="只显示输入指标（不调模型，用来确认输入拉到了没有）")
+
     ev = sub.add_parser("eval", help="M8：跑离线评估套件（有退出码，可接 CI）")
     ev.add_argument("--suite", default="perturbation_v1", help="用例集名（suites/<name>.yaml）")
     ev.add_argument("--strict", action="store_true", help="软门禁也要求 100%")
@@ -849,6 +905,8 @@ def main() -> None:
         cmd_reject(args.task_id, args.by, args.note)
     elif args.cmd == "trace":
         cmd_trace(args.trace_id)
+    elif args.cmd == "brief":
+        cmd_brief(save=not args.no_save, use_llm=not args.no_llm)
     elif args.cmd == "status":
         cmd_status()
     elif args.cmd == "today":

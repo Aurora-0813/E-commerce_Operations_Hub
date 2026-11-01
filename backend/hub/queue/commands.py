@@ -60,6 +60,13 @@ def enqueue(kind: str = "full", params: dict | None = None) -> int:
     q.ensure_group(r)
     msg_id = q.enqueue(r, run_id)
 
+    # 审计：触发一次运行（`run.trigger`）—— 路线图 §10.2 ✅
+    # 记在**入队成功之后**：没进队列的（上面 return 2）不记，
+    # 因为它还没"发生"（只是写了个 QUEUED，等对账器捡 ✅）
+    from hub.audit import write as audit_write
+    audit_write(actor="cli", action="run.trigger", resource=f"run:{run_id}",
+                detail={"kind": kind, "trace_id": trace_id, "msg_id": str(msg_id)})
+
     # 清理：只保留最近 50 条【已结束】的链，避免 pipeline_run 无限增长
     # （每天一条 + 回填，一年就是几百条；旧的不删，`hub queue` 的列表会越来越长）
     _prune_old_runs(keep=50)
@@ -233,6 +240,13 @@ def replay(run_id_prefix: str) -> int:
         run_id = str(row.id)
         stage = row.current_stage
         s.commit()
+
+    # 审计：重放死信（`dlq.replay`）—— 路线图 §10.2 ✅
+    # 为什么这条重要：重放是"把已经失败的东西再跑一遍"，
+    # 事后一定要能回答"谁在什么时候让哪条重跑的" ✅
+    from hub.audit import write as audit_write
+    audit_write(actor="cli", action="dlq.replay", resource=f"run:{run_id}",
+                detail={"stage": stage, "prefix": run_id_prefix})
 
     r = q.get_redis()
     q.ensure_group(r)

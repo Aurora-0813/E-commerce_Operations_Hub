@@ -10,7 +10,7 @@ M5 网关管的是"能不能做"，而"能做什么"由这张注册表决定。
 一个工具要声明的东西（每一项都对应网关的一道检查）：
     params_model    参数模型 → 网关做**强类型校验**（不是 if 判断字段在不在）
     risk_level      L0 只读 / L1 无对外 / L2 有限影响 / L3 不可逆或涉及资金
-    required_role   L2 要 operator、L3 要 manager（角色跟着工具走，不写死在网关里）
+    required_role   L2 要 operator、L3 要 supervisor（角色跟着工具走，不写死在网关里）
     evidence_types  必须提供哪类依据（有依据才能做，防止"拍脑袋执行"）
     compensate      补偿动作（None = 不可逆，必须人工）
     outcome_metrics 这个动作该看什么效果指标（M9 复盘要用，现在先存着）
@@ -60,7 +60,7 @@ class RiskLevel:
 class CallContext:
     """一次工具调用的上下文（谁、在哪个租户、属于哪次运行）。"""
     tenant_id: str = "default"
-    role: str = "system"       # system / operator / manager
+    role: str = "system"       # system / analyst / operator / supervisor / admin
     trace_id: str = ""
     run_id: str = ""
     proposal_id: str = ""
@@ -86,7 +86,18 @@ class CallContext:
         """
         if not required:
             return True
-        order = {"system": 0, "operator": 1, "manager": 2}
+        # ⚠️ 角色序 **必须覆盖 `app_user.role` 的全部取值**（2026-10-31 修 ✅）
+        #    原来只有 system/operator/manager 三个 ✅ ✗
+        #    → `required="supervisor"` 会落到 `order.get(..., 99)` = 99 → **永远 False** ✅
+        #    → 后果：L3 改价**谁批都过不了**（而 app_user 的 CHECK 里根本没有 manager ✅）
+        #    现在的序（和 app_user 的 CHECK 一致：operator/supervisor/admin/analyst ✅）：
+        #      system   0 —— 无特权（L0/L1 本来就不查角色 ✅ 见上面"没有 system 豁免"）
+        #      analyst  1 —— 只读分析，够 L0/L1
+        #      operator 2 —— 能提 L2（改描述/改回复）
+        #      supervisor 3 —— 能批 L3（改价，涉及资金）
+        #      admin    4
+        order = {"system": 0, "analyst": 1, "operator": 2,
+                 "supervisor": 3, "admin": 4}
         return order.get(self.role, -1) >= order.get(required, 99)
 
 

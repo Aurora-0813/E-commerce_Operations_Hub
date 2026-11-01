@@ -65,6 +65,23 @@ def adopt(result: HandleResult, *, llm=None) -> UUID | None:
             print(f"  ⚠️ 不能采纳：簇不存在 {cid}")
             return None
 
+        # ---- **去重**（2026-11-01 补，债台账 #42）----
+        # 同一个簇 + 同一个工具，如果已经有**未完成**的提案（PROPOSED/PENDING_APPROVAL），
+        # 就不再生成第二个 ✅ —— 否则反复采纳会堆出一堆重复提案 ✅ ✗
+        # 为什么按 (cluster_id, tool_name) 而不是只按 cluster：
+        #   一个簇可能先被采纳成"改描述"，后来又被采纳成"回复差评" ✅
+        #   那是**两个不同的动作**，应该都允许 ✅
+        from hub.persistence.models import ActionProposal as _AP
+        dup = s.scalars(select(_AP).where(
+            _AP.tool_name == result.tool,
+            _AP.status.in_(("PROPOSED", "PENDING_APPROVAL")),
+            _AP.evidence_refs.contains([{"issue_cluster": str(cid)}]),
+        ).limit(1)).first()
+        if dup is not None:
+            print(f"  ⚠️ 已有未完成的同类提案 {dup.id}"
+                  f"（{result.tool} / {dup.status}）→ 不重复生成 ✅")
+            return dup.id
+
         # 取簇成员 —— **要 `ClusterMember` 对象**（不是 Record 行）✅
         # proposer 的 `_member_texts` / `_primary_spu` 用的是 `m.record_id`，
         # 然后自己按 id 去查文本（2026-10-31 核对过，不是猜的）
@@ -137,6 +154,14 @@ def adopt(result: HandleResult, *, llm=None) -> UUID | None:
         s.flush()
         pid = prop.id
         s.commit()
+
+    # 审计：采纳 agent 的结论（`agent.adopt`）—— 路线图 §10.2 ✅
+    # 为什么重要：这是"AI 的建议变成正式提案"的那一刻 ✅
+    # 事后要能回答：这条提案是 agent 提的还是批处理提的？依据是什么？✅
+    from hub.audit import write as audit_write
+    audit_write(actor="cli", action="agent.adopt", resource=f"proposal:{pid}",
+                detail={"cluster_id": str(cid), "tool": result.tool,
+                        "status": result.status, "critique": result.critique or {}})
 
     print(f"  ✅ 已生成提案 {pid}（工具 {result.tool}，参数由代码构造）")
     if rule_tool and rule_tool != result.tool:

@@ -99,26 +99,32 @@ def main() -> None:
 
     # ---------- 第 5 步：截断容错（离线，不调模型）----------
     print("\n=== 第 5 步：JSON 被截断时能不能救回已生成的对象 ===")
-    from hub.analysis.classify import _parse_array   # 局部导入，避免顶部噪音
+    # ⚠️ 函数在 `hub/analysis/classify.py` 里叫 **`_parse_lines`**（2026-11-01 核对）✅
+    #    测试里写的是 `_parse_array` —— 那个名字已经不存在 ✅ ✗
+    #    （`full` 组不常跑 → 这个 stale import 一直没被发现 ✅）
+    from hub.analysis.classify import _parse_lines
 
+    # ⚠️ **这一步原来测的是 JSON 数组解析（`_parse_array`）** ✅
+    #    但 M3 的分类输出**已经不是 JSON 了**，改成了行格式 `R1|quality,size|3|回显` ✅
+    #    → 函数名和契约都变了 ✅ ✗
+    #    现在按 `_parse_lines` 的**真实契约**测（它的 docstring 写得很清楚 ✅）：
+    #      · 4 段（问题|严重度|回显）→ 齐全 ✅
+    #      · **漏回显（3 段）→ 前两段还在，分类可用** ✅ ← 这是它最关键的容错
+    #      · 非 `R\d+` 开头的行 → 跳过 ✅
     cases = [
-        ("完整数组",
-         '[{"id":"R1","topic":"quality","severity":3,"confidence":0.9}]', 1),
-        ("markdown 围栏",
-         '```json\n[{"id":"R1","topic":"size","severity":2,"confidence":0.8}]\n```', 1),
-        ("**截断**（第 2 个对象写了一半）",
-         '[{"id":"R1","topic":"quality","severity":3,"confidence":0.9},\n'
-         '{"id":"R2"', 1),
-        ("完全不是 JSON", "我觉得这些评价都挺差的", 0),
+        ("完整 4 段", "R1|quality|3|穿一次就起球", 1),
+        ("**漏回显的 3 段**", "R1|quality|3", 1),
+        ("多主题", "R1|quality,size|2|掉色 偏大", 1),
+        ("完全不是这个格式", "我觉得这些评价都挺差的", 0),
     ]
     all_ok = True
     for label, text, expect in cases:
-        parsed = _parse_array(text)
-        got = len(parsed) if parsed else 0
+        parsed = _parse_lines(text)
+        got = len(parsed or {})
         ok = got == expect
         all_ok = all_ok and ok
-        print(f"  {'✅' if ok else '❌'} {label:<26} 恢复 {got} 个（预期 {expect}）")
-    print(f"  {'✅ 截断容错正常（截断时至少救回完整的对象）' if all_ok else '❌ 解析逻辑有问题'}")
+        print(f"  {'✅' if ok else '❌'} {label:<22} 解析出 {got} 条（预期 {expect}）")
+    print(f"  {'✅ 行格式解析正常（漏回显也能用）' if all_ok else '❌ 解析逻辑有问题'}")
 
 
 if __name__ == "__main__":

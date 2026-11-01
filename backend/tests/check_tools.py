@@ -57,7 +57,8 @@ def run(tool_name: str, args: dict, ctx: CallContext) -> tuple[dict, bool]:
 
 
 def main() -> None:
-    ctx = CallContext(role="manager")      # 测试用最高角色，避免权限挡住
+    # ⚠️ `manager` 不在角色序里（2026-11-01 统一成 system/analyst/operator/supervisor/admin ✅）
+    ctx = CallContext(role="supervisor")      # 测试用能过 L2/L3 的角色
 
     # ---------- ① 注册表 ----------
     print("=== ① 注册表 ===")

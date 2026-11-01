@@ -141,7 +141,10 @@ def main() -> None:
 
     ctx_sys = CallContext(role="system", trace_id="gw-test")
     ctx_op = CallContext(role="operator", trace_id="gw-test")
-    ctx_mgr = CallContext(role="manager", trace_id="gw-test")
+    # 2026-10-31：`manager` 改 `supervisor` —— `app_user` 的 CHECK 里没有 manager，
+    # 而且 `CallContext.has_role` 的角色序也统一成了
+    # system < analyst < operator < supervisor < admin ✅
+    ctx_mgr = CallContext(role="supervisor", trace_id="gw-test")
 
     def call(tool, args, refs=None, ctx=ctx_mgr, pid=None):
         return invoke(ToolCall(tool_name=tool, args=args,

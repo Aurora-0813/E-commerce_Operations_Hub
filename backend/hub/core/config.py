@@ -121,6 +121,42 @@ class QueueConf(BaseModel):
     claim_interval_s: int = 60         # 每 60 秒扫一次 PEL
 
 
+class AuthConf(BaseModel):
+    """认证设置（阶段 4.1）。
+
+    **为什么 JWT secret 允许留空**：
+        留空时 `hub/core/auth.py` 会用**公开的开发默认密钥**并每次启动打警告 ✅
+        （你 2026-10-31 定的："给个默认值就行"）
+        但那个默认值意味着"任何人都能签 token" —— 生产必须配一个随机串 ✅
+    """
+
+    # 留空 = 用开发默认密钥（会打警告）✅
+    jwt_secret: str = ""
+    # 有效期（分钟）。你 2026-10-31 定：**3 小时 = 180 分钟** ✅
+    # ⚠️ **不硬编码**：`.env` 里写 `HUB_AUTH__ACCESS_TOKEN_MINUTES=180` ✅
+    #    这里的默认值只是"没配时也能跑"的兜底 ✅
+    # 为什么现在敢用 3 小时：
+    #     加了**服务端撤销**（token 黑名单，见 hub/core/auth.py 的 revoke ✅）
+    #     → 泄漏窗口不再由"有效期"单独决定，登出即可作废 ✅
+    access_token_minutes: int = 180
+    # 初始用户密码（scripts/seed_users.py 用）。**不写进代码** ✅
+    # 你定的默认值 123456 ✅；上生产改成 .env 里的强密码 ✅
+    seed_password: str = "123456"
+
+
+class NotifyConf(BaseModel):
+    """通知渠道（阶段 3.7）。
+
+    **webhook 优先**（企微/飞书，一个 POST 就行 ✅）
+    没配 → 通知标 `SKIPPED`（**不假装发过** ✅）
+    """
+    # 企微/飞书的 webhook 地址；留空 = 不发（本地开发常态 ✅）
+    webhook_url: str = ""
+    webhook_timeout_s: int = 5
+    # 同一类事件多少分钟内合并成一条（路线图 §9.5.1：10 分钟 ✅）
+    merge_window_min: int = 10
+
+
 class CloudConf(BaseModel):
     """云端模型的数据外发策略（阶段 1.2）。
 
@@ -166,3 +202,5 @@ class Settings(BaseSettings):
     gateway: GatewayConf = GatewayConf()
     queue: QueueConf = QueueConf()    # M7 调度（Redis Stream）
     cloud: CloudConf = CloudConf()    # 数据外发策略（阶段 1.2）
+    auth: AuthConf = AuthConf()       # 认证（阶段 4.1）
+    notify: NotifyConf = NotifyConf()  # 通知渠道（阶段 3.7）

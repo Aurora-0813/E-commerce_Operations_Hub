@@ -85,7 +85,17 @@ def _decide(task_id: str, status: str, by: str, note: str | None) -> None:
         task.assignee = by
         task.decision_note = note
         task.decided_at = datetime.now(timezone.utc)
+        pid = str(task.proposal_id)
         s.commit()
+    # **审计：谁批的 / 谁拒的**（路线图 §10.2）
+    # 为什么在业务层写：`hub approve`（CLI）和未来的 `POST /api/...` 都要记 ✅
+    from hub.audit import write as audit_write
+    audit_write(
+        actor=by,                       # 阶段 4 之前是角色名；有了登录就是 user:<id> ✅
+        action=("proposal.approve" if status == "APPROVED" else "proposal.reject"),
+        resource=f"proposal:{pid}",
+        detail={"task_id": task_id, "note": note or "", "by": by},
+    )
 
 
 def reject(task_id: str, by: str, note: str | None = None) -> dict:

@@ -363,9 +363,48 @@ def judge_step(res: HandleResult, llm=None, *, use_rule: bool = True) -> HandleR
 
     topic = res.topic or ""
     evidence_text = "\n".join(f"{e['ref']}：{e['text']}" for e in res.evidence)
+
+    # ---------------- Case RAG：检索历史案例，附进 prompt（阶段 3.5 ④）----------------
+    # 路线图 §8.3："注入 rationale 里附『参考案例』，**每条引用必须存在**"
+    # ⚠️ 现在案例库是空的（真实干预还在观察窗口 ✅）
+    #    → `retrieve()` 返回 [] → **不注入** ✅（不编造"参考案例" ✅）
+    case_block, cases = "", []
+    try:
+        from hub.rag.case_rag import render_cases, retrieve
+        query = (next((e["text"] for e in res.evidence if e["ref"] == "E1"), "")
+                 + " " + " ".join(e["text"] for e in res.evidence
+                                  if e["source"] == "query_reviews"))
+        cases = retrieve(query, topic=topic or None)
+        case_block = render_cases(cases)
+        if cases:
+            res.evidence.append({"source": "case", "ref": "E-CASE",
+                                 "text": f"检索到 {len(cases)} 条历史案例（"
+                                         + "、".join(c["case_id"] for c in cases) + "）"})
+    except Exception as e:                        # noqa: BLE001
+        # 检索失败**不该让整个判断崩** ✅（案例是增强，不是必需 ✅）
+        res.evidence.append({"source": "case", "ref": "E-CASE",
+                             "text": f"案例检索失败（不影响判断）：{type(e).__name__}: {e}"})
+
+    # ---------------- 知识条目（阶段 3.8）：**只追加、不覆盖**规则 ✅ ----------------
+    # 路线图 §9.5.2："把已发布条目按 (topic, type) 取出，拼到提示词的【固定段落】"
+    #   "**不覆盖系统提示，不替换规则，只『追加口径说明』**" ✅
+    #   DRAFT 的**不生效**（人审发布后才注入 ✅）
+    patch_block = ""
+    try:
+        from hub.knowledge import render_patches
+        patch_block, patch_hash = render_patches(topic or None)
+        if patch_block:
+            res.evidence.append({"source": "knowledge", "ref": "E-KNOW",
+                                 "text": f"口径说明 {patch_hash}（业务方已发布）"})
+    except Exception as e:                        # noqa: BLE001
+        res.evidence.append({"source": "knowledge", "ref": "E-KNOW",
+                             "text": f"知识条目读取失败（不影响判断）：{type(e).__name__}: {e}"})
+
     prompt = (
         f"任务：{res.goal}\n\n"
         + (f"{_rule_block(topic)}\n\n" if use_rule else "")
+        + (f"{case_block}\n\n" if case_block else "")
+        + (f"{patch_block}\n\n" if patch_block else "")
         + f"证据（**只能引用下面的编号**）：\n{evidence_text}\n\n"
         "请判断这些证据支持什么处置。"
     )

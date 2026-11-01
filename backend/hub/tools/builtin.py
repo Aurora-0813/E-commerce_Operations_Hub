@@ -330,7 +330,12 @@ def register_all() -> None:
         risk_level=RiskLevel.L3,
         handler=_update_price,
         verify=_verify_update_price,
-        required_role="manager",
+        # ⚠️ 2026-10-31 改：原来是 "manager"，但 `app_user` 的 CHECK 约束只有
+        #    operator / supervisor / admin / analyst —— **没有 manager** ✅
+        #    → 也就是说 L3 改价**永远没人批得动** ✅ ✗
+        #    路线图 §10.1 已经定了"没有 manager，一律用 supervisor" ✅
+        #    这里按它改（工具声明的角色必须和用户表能表达的角色对齐 ✅）
+        required_role="supervisor",
         evidence_types=frozenset({"anomaly"}),
         compensate=None,          # 不可逆：没有补偿动作
         outcome_metrics=("conversion_rate", "gmv"),

@@ -101,7 +101,10 @@ def main() -> None:
         return
     spu_id, platform, cluster_id = in_spu.canonical_spu_id, in_spu.platform, str(cluster.id)
     refs = {"issue_cluster": cluster_id}
-    ctx = CallContext(role="manager", trace_id="exec-test")
+    # ⚠️ `manager` 不在角色序里（2026-11-01 统一成 system/analyst/operator/supervisor/admin ✅）
+    #    L2 要 operator、L3 要 supervisor ✅
+    #    测试用 supervisor（能过 L2 和 L3 ✅）
+    ctx = CallContext(role="supervisor", trace_id="exec-test")
     print(f"商品={platform}/{spu_id}  簇={cluster_id[:8]}\n")
 
     def desc_of() -> str | None:

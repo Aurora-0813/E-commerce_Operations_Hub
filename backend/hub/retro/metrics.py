@@ -74,6 +74,49 @@ class DidInput:
         return len(self.control)
 
 
+def sales_rates(spus: list[str], start: date, end: date) -> dict:
+    """一组商品在窗口内的**售后/转化**指标（阶段 3.4）。
+
+    ⚠️ **这两个数只作展示，不参与判定**（2026-11-01 的数据结论）：
+        `scripts/probe_refund_corr.py` 实测 40 个 observation，
+        "差评率变化"和"退款率变化"**同向只有 21/40 = 52.5%** ——
+        等于抛硬币（随机 50%）✅
+        根因：`generate_mock.py` 里退款是独立随机数（`gmv × uniform(0.01,0.03)`），
+              和差评**没有任何耦合** ✅
+        → 硬写进判定 = **用随机数判定业务效果** ✅ ✗
+        详见 `docs/开发指南/16_阶段3.4_复盘指标扩展.md`
+        **什么时候可以加进判定**：mock 加了耦合，或接真实平台数据后，
+        重跑那个探针、同向率 > 75% 即可 ✅
+
+    口径：
+        refund_rate = 退款件数 / 支付件数   ← `sales_daily.refund_units / units`
+        conversion  = **支付件数 / 访客数**  ← `units / uv`
+        ⚠️ `sales_daily.conversion` 这一列**在库里全是 NULL**（2026-11-01 核对 ✅）
+           → 所以**自己用 `units / uv` 算**，不要读那一列 ✅
+           （读它会得到 None，然后"转化率 0%"这种假数据 ✅）
+    """
+    if not spus:
+        return {"gmv": 0.0, "units": 0, "refund_units": 0, "refund_rate": None,
+                "conversion": None, "uv": 0}
+    from hub.persistence.db import get_session
+    from hub.persistence.models import SalesDaily
+
+    with get_session() as s:
+        row = s.execute(
+            select(func.sum(SalesDaily.gmv), func.sum(SalesDaily.units),
+                   func.sum(SalesDaily.refund_units), func.sum(SalesDaily.uv))
+            .where(SalesDaily.canonical_spu_id.in_(spus),
+                   SalesDaily.stat_date >= start,
+                   SalesDaily.stat_date < end)
+        ).one()
+    gmv, units, refund, uv = (float(row[0] or 0), int(row[1] or 0),
+                              int(row[2] or 0), int(row[3] or 0))
+    return {"gmv": gmv, "units": units, "refund_units": refund,
+            "refund_rate": round(refund / units, 4) if units else None,
+            "conversion": round(units / uv, 6) if uv else None,
+            "uv": uv}
+
+
 def build_input(treated: list[str], control: list[str],
                 base_start: date, base_end: date,
                 obs_start: date, obs_end: date) -> DidInput:

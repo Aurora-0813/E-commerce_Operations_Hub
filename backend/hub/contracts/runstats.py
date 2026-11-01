@@ -33,6 +33,12 @@ from pydantic import BaseModel, Field, field_validator
 # 但如果拼错了，下面的校验会给出提示 ✅）
 KNOWN_MODULES = {
     "M2", "M3", "M4-cluster", "M4-price", "M5", "PIPELINE", "EVAL",
+    # 2026-11-01 新增：AI 日报（阶段 3.6）。
+    # 它不是"分析模块"，是"给运营看的汇总输出" ✅
+    # 为什么也算 module：它有输入（status+health+今日变化）、有输出（几条人话）、
+    # 有一个可校验的规则（"每个数字必须能在输入里找到"）
+    # → **和 M3 一样是"一次可审计的运行"** ✅
+    "brief",
 }
 
 

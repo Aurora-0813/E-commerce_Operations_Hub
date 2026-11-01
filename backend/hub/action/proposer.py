@@ -301,8 +301,16 @@ def _record_skipped(cluster, run_id, trace_id: str, reason: str) -> None:
 
 
 @traced("m5.propose")
-def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> ProposalStats:
-    """给 P0/P1 的簇生成提案（写库，不执行）。"""
+def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None,
+            only_cluster: str | None = None) -> ProposalStats:
+    """给 P0/P1 的簇生成提案（写库，不执行）。
+
+    :param only_cluster: **只给这一个簇生成提案**（UUID 或其前缀 ✅）
+        `None` = 批处理（原来的行为，CLI / 定时任务用 ✅）
+        为什么要这个参数（2026-11-01）：`POST /api/propose?cluster_id=` 是
+        "为某簇生成提案" ✅，但原来调的是批处理 → 生成的是**全局限额内的簇** ✅ ✗
+        → 加这个参数，**接口语义才和路线图一致** ✅
+    """
     import time
     t0 = time.time()
     llm = llm or get_text_llm()
@@ -310,6 +318,15 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None) -> P
 
     clusters = [c for c in ClusterRepo().fetch_latest_clusters()
                 if c.priority_tier in ("P0", "P1")]
+    # ⚠️ **按簇过滤必须在 `stats.clusters` 之前**（否则统计的是全量 ✅ ✗）
+    if only_cluster:
+        clusters = [c for c in clusters
+                    if str(c.id).startswith(str(only_cluster))]
+        stats.clusters = len(clusters)
+        if not clusters:
+            print(f"没有匹配 {only_cluster} 的 P0/P1 簇（可能是 P2/P3，或 id 不对）")
+            return stats
+        print(f"只处理这一个簇：{clusters[0].label}（{str(clusters[0].id)[:8]}）")
     stats.clusters = len(clusters)
     if not clusters:
         print("没有 P0/P1 的簇（先跑 hub cluster + hub priority）")
