@@ -372,6 +372,56 @@ def _print_sections(title: str, sections: list[tuple[str, list[tuple[str, str]]]
     print()
 
 
+def cmd_notify(*, do_scan: bool = False, do_dispatch: bool = False,
+               do_list: bool = False, limit: int = 20) -> int:
+    """阶段 3.7：通知 outbox 的命令行入口。
+
+    **为什么必须补这个入口**（2026-11-01）：
+        `notify.scan_and_emit()` / `notify.dispatch()` 原来**只有测试在调** ✅
+        → 生产里没人写通知、没人发通知 ✅ ✗
+        → 前端"通知中心"永远是 0 条 ✅ ✗
+    **什么时候跑**（部署阶段接定时）：
+        `hub notify --scan --dispatch` 每 5 分钟一次 ✅
+        （scan 幂等：同事件不重复写 ✅；dispatch 只发 PENDING ✅）
+    """
+    from hub import notify as N
+
+    print("=" * 66)
+    print("  通知 outbox（阶段 3.7）")
+    print("=" * 66)
+    if do_scan:
+        got = N.scan_and_emit()
+        print("\n  【扫描】触发源：")
+        for k, v in got.items():
+            print(f"    {k}: {v} 条")
+        print("  （幂等：同一事件不会重复写 ✅）")
+    if do_dispatch:
+        st = N.dispatch()
+        print("\n  【派发】：")
+        for k, v in st.items():
+            print(f"    {k}: {v}")
+        cfg = N._cfg()
+        if not cfg.get("webhook_url"):
+            print("  ⚠️ 没配 HUB_NOTIFY__WEBHOOK_URL → 标 SKIPPED（**不假装发过** ✅）")
+    # 默认（或 --list）：列出来 ✅
+    if do_list or not (do_scan or do_dispatch):
+        from sqlalchemy import select
+        from hub.persistence.db import get_session
+        from hub.persistence.models import Notification
+        with get_session() as s:
+            rows = s.scalars(select(Notification)
+                             .order_by(Notification.id.desc()).limit(limit)).all()
+            if not rows:
+                print("\n  （没有通知 —— 先跑 `hub notify --scan` ✅）")
+                return 0
+            print(f"\n  【最近 {len(rows)} 条】")
+            for n in rows:
+                cnt = (n.payload or {}).get("count", 1)
+                print(f"    #{n.id:<5} [{n.status:<8}] {n.event_type:<18}"
+                      f" 合并 {cnt} 条　{n.created_at:%m-%d %H:%M}")
+    return 0
+
+
 def cmd_brief(*, save: bool = True, use_llm: bool = True) -> int:
     """阶段 3.6：AI 日报。
 
@@ -859,6 +909,18 @@ def main() -> None:
     br.add_argument("--no-llm", action="store_true",
                     help="只显示输入指标（不调模型，用来确认输入拉到了没有）")
 
+    # ---- 阶段 3.7：通知（**补的入口**）----
+    # 2026-11-01 补：`notify.scan_and_emit()` 和 `notify.dispatch()` 原来
+    # **只有测试在调** → 生产里没人写通知、没人发通知 → 前端"通知中心"永远是 0 条 ✅ ✗
+    # 现在给三个动作：scan（扫触发源）/ dispatch（发出去）/ list（看看）
+    nt = sub.add_parser("notify", help="阶段3.7：通知 outbox（扫描 → 派发 → 查看）")
+    nt.add_argument("--scan", action="store_true",
+                    help="扫 4 类触发源（提案待批/复盘到期/死信/agent 转人工）写进通知表")
+    nt.add_argument("--dispatch", action="store_true",
+                    help="把 PENDING 的通知发出去（没配 webhook 会标 SKIPPED）")
+    nt.add_argument("--list", action="store_true", help="列出通知")
+    nt.add_argument("--limit", type=int, default=20, help="--list 显示几条")
+
     ev = sub.add_parser("eval", help="M8：跑离线评估套件（有退出码，可接 CI）")
     ev.add_argument("--suite", default="perturbation_v1", help="用例集名（suites/<name>.yaml）")
     ev.add_argument("--strict", action="store_true", help="软门禁也要求 100%")
@@ -907,6 +969,9 @@ def main() -> None:
         cmd_trace(args.trace_id)
     elif args.cmd == "brief":
         cmd_brief(save=not args.no_save, use_llm=not args.no_llm)
+    elif args.cmd == "notify":
+        cmd_notify(do_scan=args.scan, do_dispatch=args.dispatch,
+                   do_list=args.list, limit=args.limit)
     elif args.cmd == "status":
         cmd_status()
     elif args.cmd == "today":

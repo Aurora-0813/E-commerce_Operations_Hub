@@ -161,6 +161,10 @@ def dispatch(limit: int = 20) -> dict:
                 # 没配 webhook → **诚实标 SKIPPED**（不假装发过 ✅）
                 n.status = "SKIPPED"
                 n.payload = dict(n.payload or {}, skip_reason="没配 HUB_NOTIFY__WEBHOOK_URL")
+                # ⚠️ **必须记账**（2026-11-01 踩到）：
+                #    第一版只改了 status，没加 `stat["skipped"]` ✅ ✗
+                #    → 输出 `picked: 2 / skipped: 0`，看着像"没处理" ✅
+                stat["skipped"] += 1
                 continue
             if int(n.attempts or 0) >= MAX_ATTEMPTS:
                 n.status = "FAILED"
