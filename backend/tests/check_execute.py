@@ -254,3 +254,33 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def _cleanup_own_proposals() -> None:
+    """收尾：把本次测试造的无主提案标成 SKIPPED ✅
+
+    ⚠️ **为什么必须做**（2026-11-01 发现的污染）：
+        本测试造了 L2 提案（`PENDING_APPROVAL`），但**没建 hitl_task**
+        → 前端"待批提案"里会看到它 ✅
+        → 点"批准" → **404 NO_PENDING_TASK** ✅ ✗
+        → 这不是产品 bug，是**测试没收拾干净** ✅
+    方案：**不删，改成 SKIPPED**（保留审计痕迹 ✅）
+    """
+    from sqlalchemy import func, select
+    from hub.persistence.db import get_session
+    from hub.persistence.models import ActionProposal, HitlTask
+    with get_session() as s:
+        props = s.scalars(select(ActionProposal).where(
+            ActionProposal.status == "PENDING_APPROVAL")).all()
+        n = 0
+        for p_ in props:
+            if not (p_.trace_id or "").startswith("exec-test"):
+                continue
+            has = s.scalar(select(func.count()).select_from(HitlTask)
+                           .where(HitlTask.proposal_id == p_.id))
+            if has:
+                continue
+            p_.status = "SKIPPED"
+            n += 1
+        s.commit()
+        if n:
+            print(f"  （收尾：{n} 条测试提案已标 SKIPPED ✅）")

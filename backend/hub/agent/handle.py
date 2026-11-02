@@ -29,6 +29,11 @@ import time
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+# `save()` 要沿用 `handle()` 当时的 trace_id（2026-11-01 修）
+# ⚠️ **必须是模块级**：`handle()` 里的局部 import 在 `save()` 里看不到
+#    （踩过：局部导入 → `save()` 里 NameError ✅）
+from hub.core.tracing import current_trace_id as _current_trace_id
+
 from hub.tools.readonly import (MAX_REVIEWS, _query_cluster, _query_history,
                                 _query_outcome, _query_product, _query_reviews)
 from hub.tools.spec import CallContext
@@ -184,6 +189,17 @@ def handle(cluster_id: str, *, actor_role: str = "operator",
     _g.acquire_slot(limits)          # 超限会抛 BudgetExceeded，由调用方处理 ✅
 
     ctx = ctx or CallContext(role=actor_role, trace_id=f"agent-{uuid4().hex[:8]}")
+    # ══════════════════════════════════════════════════════════════
+    #  ⚠️ **必须把 ctx.trace_id 设成"当前 trace"**（2026-11-01 修）
+    # ══════════════════════════════════════════════════════════════
+    # **不设会怎样**：`handle()` 里所有 `span()` 都会落到默认值 **`no-trace`** ✅
+    #   → 实测 `trace_span` 里 **354 条**是 `no-trace` ✅ ✗
+    #   → `GET /api/handle/{id}/trace` **按 trace_id 查不到任何 span** ✅
+    #   → 前端「Agent 任务」页的 **token 永远显示 0** ✅ ✗
+    # 设了之后：这次运行的所有 span（工具调用 / LLM / Vision）都挂到 `agent-xxxxxxxx` 上 ✅
+    from hub.core.tracing import current_trace_id as _current_trace_id
+    from hub.core.tracing import set_trace_id
+    set_trace_id(ctx.trace_id)
     goal = f"处理问题簇 {cluster_id}：给出处置建议"
     res = HandleResult(cluster_id=cluster_id, goal=goal)
     started_at = time.time()          # ← 超时/预算的计时起点（guard 用）
@@ -544,7 +560,17 @@ def save(res: HandleResult, *, proposal_id: UUID | None = None) -> UUID:
 
         row = AgentRun(
             cluster_id=cid,
-            trace_id=f"agent-{uuid4().hex[:8]}",
+            # ══════════════════════════════════════════════════════════
+            #  ⚠️ **必须沿用 `handle()` 当时的 trace_id**（2026-11-01 修）
+            # ══════════════════════════════════════════════════════════
+            # **不沿用的后果**：`handle()` 里 `set_trace_id(ctx.trace_id)` 设的是
+            #   `agent-AAAA`，所有 span 都写在这个键下 ✅
+            #   而这里**又生成一个** `agent-BBBB` 写进 `agent_run` ✅ ✗
+            #   → `GET /api/handle/{id}/trace` 用 `agent-BBBB` 去查 → **0 条** ✅ ✗
+            #   → 前端「每步 token」永远 0（实测就是这样 ✅）
+            # 修法：优先用 **当前上下文**里的 trace_id（`handle()` 刚设过 ✅），
+            #      没有上下文（比如单独测 `save()`）才新生成 ✅
+            trace_id=(_current_trace_id() or f"agent-{uuid4().hex[:8]}"),
             actor_role="operator",
             status=res.status,
             goal=res.goal,

@@ -53,13 +53,31 @@ class Stage:
 #     把 import 放到函数里，循环就断开了。
 
 def _stage_ingest(params: dict) -> None:
-    """导入导出文件（幂等：按 platform_id upsert）。"""
+    """导入导出文件（幂等：按 platform_id upsert）。
+
+    **两种模式**（2026-11-01 改）
+        ① 入队时带了 `params["files"]`（**生产应该走这条** ✅）
+           → 只导入指定的文件 ✅
+        ② 没带 → 回退到 `data/mock/` 的固定清单（**仅本地演示** ✅）
+           → 并在日志里**明说**"用的是 mock 固定清单" ✅
+             否则生产上会以为"我上传的文件被处理了"，其实它读的是另一批 ✅ ✗
+
+    **为什么当初是硬编码**：这是本地跑通全链的快捷方式 ✅
+       → 但 `POST /api/ingest` 上线后，"导入"已经是**用户动作** ✅
+       → 链不该再自己去某个目录抓文件 ✅
+    """
     from hub.cli import cmd_p0
 
-    files = params.get("files") or [
-        {"path": str(DATA_DIR / name), "platform": plat, "type": dtype}
-        for name, plat, dtype in DEFAULT_IMPORTS
-    ]
+    files = params.get("files")
+    if not files:
+        files = [
+            {"path": str(DATA_DIR / name), "platform": plat, "type": dtype}
+            for name, plat, dtype in DEFAULT_IMPORTS
+        ]
+        print(f"    ⚠️ 入队时没有指定 files → **回退到 data/mock 的固定清单**"
+              f"（{len(files)} 个文件，仅本地演示 ✅）")
+        print(f"      生产上应该用 `POST /api/ingest` 导入，"
+              f"或在 enqueue 时传 files ✅")
     for f in files:
         path = Path(f["path"])
         if not path.exists():

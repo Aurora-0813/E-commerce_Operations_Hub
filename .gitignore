@@ -34,3 +34,12 @@ models/
 data/mock/images/
 data/mock/images_real/
 data/mock/images.zip
+
+# ===== 2026-11-02 新增 =====
+# 演示用的新数据（近 2GB，可用 scripts/generate_mock.py 重新生成 ✅）
+data/demo_new/
+data/_tmp_*.zip
+
+# E2E 截图（跑一次就产生一批，是产物不是源码 ✅）
+frontend/e2e/shots/
+frontend/e2e/shots_full/

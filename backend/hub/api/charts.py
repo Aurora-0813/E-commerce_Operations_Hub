@@ -54,18 +54,26 @@ def cluster_tiers(user: AuthUser = Depends(get_current_user)):
     from hub.persistence.models import IssueCluster
 
     with get_session() as s:
-        rows = s.execute(
-            select(IssueCluster.priority_tier, func.count(), func.sum(IssueCluster.review_count))
-            .group_by(IssueCluster.priority_tier)
-        ).all()
+        # ⚠️ **只算"当前这一次"的簇**（2026-11-01 修）
+        #    每跑一次 cluster 都会插一批新的、旧的保留当历史 ✅
+        #    → 不过滤就会把 4 次的簇全算进来（P0 显示 8 个 ✅ ✗）
+        from hub.persistence.current import current_run_id
+        rid = current_run_id(s)
+        stmt = (select(IssueCluster.priority_tier, func.count(),
+                       func.sum(IssueCluster.review_count))
+                .group_by(IssueCluster.priority_tier))
+        if rid is not None:
+            stmt = stmt.where(IssueCluster.run_id == rid)
+        rows = s.execute(stmt).all()
     return {"items": [{"tier": t or "未定", "clusters": int(c), "reviews": int(n or 0)}
-                      for t, c, n in rows]}
+                      for t, c, n in rows], "run_id": str(rid) if rid else None}
 
 
 # ════════════════════════════════════════════════════ ⑦ 簇条数
 @router.get("/charts/clusters")
 def clusters(sort: str = Query("reviews", pattern="^(reviews|priority|label)$"),
              limit: int = Query(50, ge=1, le=200),
+             run_id: str | None = Query(None, description="看历史某一次；不传=最新 ✅"),
              user: AuthUser = Depends(get_current_user)):
     """簇列表（按条数/优先级排序）。表格和图⑦同源 ✅"""
     from sqlalchemy import select
@@ -77,8 +85,18 @@ def clusters(sort: str = Query("reviews", pattern="^(reviews|priority|label)$"),
              "priority": IssueCluster.priority_score.desc().nullslast(),
              "label": IssueCluster.label.asc()}[sort]
     with get_session() as s:
-        rows = s.scalars(select(IssueCluster).order_by(order).limit(limit)).all()
-        return {"items": [{"id": str(c.id), "label": c.label,
+        # ⚠️ **只看当前这一次**；传 `run_id` 可以看历史某一次 ✅
+        from hub.persistence.current import current_run_id
+        from uuid import UUID as _UUID
+        try:
+            rid = _UUID(run_id) if run_id else current_run_id(s)
+        except ValueError:
+            rid = current_run_id(s)
+        stmt = select(IssueCluster)
+        if rid is not None:
+            stmt = stmt.where(IssueCluster.run_id == rid)
+        rows = s.scalars(stmt.order_by(order).limit(limit)).all()
+        return {"run_id": str(rid) if rid else None, "items": [{"id": str(c.id), "label": c.label,
                            "reviews": c.review_count, "tier": c.priority_tier,
                            "score": float(c.priority_score) if c.priority_score else None,
                            "domain": c.business_domain,
@@ -178,16 +196,47 @@ def retro(limit: int = Query(50, ge=1, le=200),
     with get_session() as s:
         rows = s.scalars(select(ActionOutcome)
                          .order_by(ActionOutcome.created_at.desc()).limit(limit)).all()
-        return {"items": [{"proposal_id": str(r.proposal_id), "status": r.status,
-                           "effect": r.effect, "conclusion": r.conclusion,
-                           "confidence": float(r.confidence) if r.confidence is not None else None,
-                           "reason_code": r.reason_code,
-                           "baseline": [r.baseline_start.isoformat() if r.baseline_start else None,
-                                        r.baseline_end.isoformat() if r.baseline_end else None],
-                           "observe_end": r.observe_end.isoformat() if r.observe_end else None,
-                           "metrics_before": r.metrics_before,
-                           "metrics_after": r.metrics_after}
-                          for r in rows]}
+        # ⚠️ **`effect` 是 JSONB**（dict ✅），里面存了 DID 的点估计和区间
+        #    （2026-11-01 修）：以前直接返回整个 dict，前端拿不到 `ci_low/ci_high`
+        #    → "区间跨不跨 0"的误差棒画不出来 ✅ ✗
+        #    → 这里**把区间拆成独立字段**（同时保留原始 `effect` 不动 ✅）
+        def _split(eff):
+            point = ci_low = ci_high = None
+            if isinstance(eff, dict):
+                for k in ("point", "effect", "did", "value"):
+                    if isinstance(eff.get(k), (int, float)):
+                        point = float(eff[k]); break
+                for k in ("ci_low", "low", "lower", "ci_lower"):
+                    if isinstance(eff.get(k), (int, float)):
+                        ci_low = float(eff[k]); break
+                for k in ("ci_high", "high", "upper", "ci_upper"):
+                    if isinstance(eff.get(k), (int, float)):
+                        ci_high = float(eff[k]); break
+            elif isinstance(eff, (int, float)):
+                point = float(eff)
+            return point, ci_low, ci_high
+
+        items = []
+        for r in rows:
+            pt, lo, hi = _split(r.effect)
+            items.append({
+                "proposal_id": str(r.proposal_id), "status": r.status,
+                "effect": r.effect,
+                # **拆出来的三个数**（前端画误差棒用 ✅）
+                "effect_point": pt, "ci_low": lo, "ci_high": hi,
+                # **区间跨不跨 0**（后端直接判定，前端不用重复逻辑 ✅）
+                "crosses_zero": (None if (lo is None or hi is None)
+                                 else bool(lo <= 0 <= hi)),
+                "conclusion": r.conclusion,
+                "confidence": float(r.confidence) if r.confidence is not None else None,
+                "reason_code": r.reason_code,
+                "baseline": [r.baseline_start.isoformat() if r.baseline_start else None,
+                             r.baseline_end.isoformat() if r.baseline_end else None],
+                "observe_end": r.observe_end.isoformat() if r.observe_end else None,
+                "metrics_before": r.metrics_before,
+                "metrics_after": r.metrics_after,
+            })
+        return {"items": items}
 
 
 # ════════════════════════════════════════════════════ ⑱ 日志趋势
@@ -455,6 +504,46 @@ def get_agent_trace(run_id: str, request: Request,
         rows = s.scalars(select(TraceSpan)
                          .where(TraceSpan.trace_id == run.trace_id)
                          .order_by(TraceSpan.start_ts)).all()
+        # ══════════════════════════════════════════════════════════════
+        #  ⚠️ **回退查法**（2026-11-01 修）：按 `run.trace_id` 常常查不到 ✅
+        # ══════════════════════════════════════════════════════════════
+        # 现象：`GET /api/handle/{id}/trace` 返回 `items: []`
+        #   → Agent 页的「token：0 in / 0 out」永远 0 ✅ ✗
+        # 原因：`agent_run.trace_id` 是 `agent-xxxxxxxx`，
+        #       而 `trace_span` 里那几步用的 trace_id 是**外层**的（`cli` / `handle-…` ✅）
+        # 修法：**依次试几个键**，哪个能查到用哪个 ✅
+        #   ① 精确 `run.trace_id`
+        #   ② `trace:<run_id>`（有些入口这么写）
+        #   ③ **`span_id` / `trace_id` 里含 run_id 前 8 位**（兜底，最实用 ✅）
+        if not rows:
+            rid8 = str(rid)[:8]
+            rows = s.scalars(
+                select(TraceSpan)
+                .where((TraceSpan.trace_id == f"trace:{rid}")
+                       | (TraceSpan.trace_id.like(f"%{rid8}%"))
+                       | (TraceSpan.span_id.like(f"%{rid8}%")))
+                .order_by(TraceSpan.start_ts)).all()
+        if not rows:
+            # ══════════════════════════════════════════════════════════
+            #  ⚠️ **最后一层兜底：按时间窗**（2026-11-01 修，实测必需）
+            # ══════════════════════════════════════════════════════════
+            # **实测真相**：`trace_span.trace_id` 大量是 **`no-trace`**（354 条 ✅）
+            #   → agent 那几步的 span **根本没带 trace 上下文** ✅ ✗
+            #   → 所以按 trace_id / span_id 都查不到 ✅
+            # 但 `agent_run.started_at` / `finished_at` 是准的 ✅
+            #   → 就取 **这个时间窗内的 `no-trace` span**（agent 一次只有几十条 ✅）
+            # ⚠️ `AgentRun` **没有 started_at / finished_at**（2026-11-01 核对 ✅）
+            #    → 用 `created_at` 做起点 + **180 秒窗口**（agent 一次 3~10 秒，很宽裕 ✅）
+            if run.created_at:
+                from datetime import timedelta
+                lo = run.created_at - timedelta(seconds=5)
+                hi = run.created_at + timedelta(seconds=180)
+                rows = s.scalars(
+                    select(TraceSpan)
+                    .where(TraceSpan.trace_id == "no-trace",
+                           TraceSpan.start_ts >= lo,
+                           TraceSpan.start_ts <= hi)
+                    .order_by(TraceSpan.start_ts)).all()
         items = []
         for sp in rows:
             ms = None

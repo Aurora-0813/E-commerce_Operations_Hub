@@ -40,8 +40,11 @@ def cleanup() -> None:
     from hub.persistence.db import get_session
     from hub.persistence.models import PipelineRun
     with get_session() as s:
+        # ⚠️ **2026-11-01 改**：连 `RUNNING` 一起删
+        #    否则上一次测试留下的"卡住的 RUNNING"会挡住 `POST /api/runs`（409 ✅ ✗）
+        #    为什么删得掉：测试进程里没有真的 worker 在跑它 ✅
         s.execute(delete(PipelineRun).where(
-            PipelineRun.status == "QUEUED",
+            PipelineRun.status.in_(("QUEUED", "RUNNING")),
             PipelineRun.kind.in_(("full",)) |
             PipelineRun.kind.like("handle:%")))
         s.commit()

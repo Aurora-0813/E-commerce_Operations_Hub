@@ -218,8 +218,17 @@ def get_vision(model: str = "mock") -> VisionModel:
         from hub.core.config import Settings
 
         s = Settings()
+        # ⚠️ **2026-11-01 修的真 bug**：这里原来直接回退到 `s.llm.base_url`，
+        #    而那是 **OpenAI 兼容层**（`http://localhost:11434/v1` ✅）——
+        #    但 **Ollama 原生的 `/api/chat` 不带 `/v1`** ✅
+        #    → 拼出来是 `/v1/api/chat` → **404** ✅ ✗
+        #    （实测：M2 的 50 次 Vision 调用全部 "HTTP Error 404: Not Found" ✅）
+        # 修法：**去掉尾部 `/v1`**，并允许 `HUB_VISION__BASE_URL` 单独配 ✅
+        base = (s.vision.base_url or s.llm.base_url or "http://localhost:11434").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
         return OllamaVision(
-            base_url=s.vision.base_url or s.llm.base_url or "http://localhost:11434",
+            base_url=base,
             model=s.vision.model or "qwen2.5vl:3b",
             timeout=s.vision.timeout_s or 180,
         )

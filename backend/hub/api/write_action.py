@@ -179,7 +179,8 @@ def adopt_run(run_id: str, body: AdoptIn, request: Request,
     from hub.agent.adopt import adopt as adopt_fn
     from hub.agent.handle import HandleResult
     from hub.persistence.db import get_session
-    from hub.persistence.models import AgentRun
+    # 需要 ActionProposal 来"提交后重读状态"（2026-11-01 修：漏了它会 500 NameError）
+    from hub.persistence.models import ActionProposal, AgentRun
 
     try:
         rid = UUID(run_id)
@@ -230,7 +231,32 @@ def adopt_run(run_id: str, body: AdoptIn, request: Request,
         if r2 is not None:
             r2.proposal_id = pid
             s.commit()
-    return {"ok": True, "proposal_id": str(pid), "already_adopted": False}
+
+    # ══════════════════════════════════════════════════════════════
+    #  ⚠️ **必须紧接着提交网关**（2026-11-01 修的 bug）
+    # ══════════════════════════════════════════════════════════════
+    # **不提交会怎样**：`adopt()` 只写一条 `status=PROPOSED` 的提案 ✅
+    #   → 网关没跑 → **不建 `hitl_task`**
+    #   → `POST /api/proposals/{id}/approve` **永远 404 NO_PENDING_TASK** ✅ ✗
+    #   → **演示链就断在"批准"这一步** ✅
+    # ⚠️ 提交 **不等于执行**：L2 仍只出 `PENDING_APPROVAL`，L3 只出 `PENDING_HITL` ✅
+    submit_info: dict = {"submitted": False}
+    try:
+        from hub.agent.adopt import submit as submit_fn
+        # 采纳本身是 operator 动作 → 用 operator 身份提交（不用 supervisor 的权限 ✅）
+        res2 = submit_fn(pid, role="operator")
+        submit_info = {"submitted": True, **(res2 or {})}
+    except Exception as e:                        # noqa: BLE001
+        # **提交失败不能让采纳回滚**（提案已建 ✅）→ 只报告
+        submit_info = {"submitted": False,
+                       "submit_error": f"{type(e).__name__}: {e}"}
+
+    # 提交后重读状态（`PENDING_APPROVAL` / `PENDING_HITL` / `EXECUTED` ✅）
+    with get_session() as s:
+        p2 = s.get(ActionProposal, pid)
+        final_status = p2.status if p2 is not None else None
+    return {"ok": True, "proposal_id": str(pid), "already_adopted": False,
+            "status": final_status, "submit": submit_info}
 
 
 # ════════════════════════════════════════════════════ 5. handle/reject

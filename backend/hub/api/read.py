@@ -76,8 +76,56 @@ def get_brief(user: AuthUser = Depends(get_current_user)):
                 "reason": "还没生成过日报 —— 跑 `hub brief` 或等定时任务",
                 "items": []}
     r = rows[0]
+    # ⚠️ **`inputs`（来源指标）要现算**（2026-11-01 修）
+    #   `brief` 生成时用 `collect_inputs()` 拉了一批数字，**只有它知道每个数字的来源** ✅
+    #   而 `latest()` 只返回文本 ✅ → 前端"来源指标"那块就空了 ✅ ✗
+    #   → 这里**重新拉一次**（只读聚合，几十毫秒 ✅），把扁平的数字给前端 ✅
+    inputs: dict = {}
+    try:
+        from hub.brief import collect_inputs
+
+        # ⚠️ **不要把 `_flatten_numbers` 用在这里**（2026-11-01 踩过 ✅）
+        #    那个函数是**校验累加器**：签名 `(obj, acc: set[str], depth)`、
+        #    把数字**格式化成字符串**收进 set、**返回 None** ✅
+        #    → 它的用途是"这堆数字够不够校验日报"，**不是给人看的** ✅
+        #    → 我要的是 **"指标名 → 值"**，所以自己拍平嵌套 dict ✅
+        def _flat(obj, prefix: str = "", out: dict | None = None,
+                  depth: int = 0) -> dict:
+            out = {} if out is None else out
+            if depth > 4:
+                return out
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    _flat(v, f"{prefix}.{k}" if prefix else str(k), out, depth + 1)
+            elif isinstance(obj, (list, tuple)):
+                # ⚠️ **`[label, value]` 二元组要特殊处理**（2026-11-01 修）
+                #    `collect_inputs()` 里的 `items` 就是这种形状 ✅
+                #    → 拍平后应该直接是 **`{label: value}`**，而不是 `status[0][1][0]` ✅
+                if (len(obj) == 2 and isinstance(obj[0], str)
+                        and isinstance(obj[1], (int, float))
+                        and not isinstance(obj[1], bool)):
+                    out[obj[0]] = obj[1]
+                    return out
+                if prefix:
+                    out[f"{prefix}.n"] = len(obj)
+                for i, v in enumerate(obj[:3]):
+                    _flat(v, f"{prefix}[{i}]", out, depth + 1)
+            elif isinstance(obj, bool) or obj is None:
+                return out
+            elif isinstance(obj, (int, float)):
+                # ⚠️ **只收数字**（2026-11-01 修）
+                #    第一版连字符串也收 → 前端"来源指标"会显示一堆
+                #    `status[0][0] = 规模与影响` 这种噪音 ✅ ✗
+                #    "来源指标"要的是**能被统计的数字** ✅
+                out[prefix] = obj
+            return out
+
+        inputs = _flat(collect_inputs())
+    except Exception as e:                        # noqa: BLE001
+        inputs = {"__error__": f"{type(e).__name__}: {e}"}
     return {"available": True, "generated_at": r["created_at"],
             "text": r["text"], "lines": (r["text"] or "").splitlines(),
+            "inputs": inputs,
             "counts": r["counts"], "fallback_table": r["fallback_table"]}
 
 
@@ -309,3 +357,96 @@ def list_knowledge(
                 "created_at": k.created_at.isoformat() if k.created_at else None,
             })
     return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+# ════════════════════════════════════════════════════ 11. 簇的评价原文（"依据展开"）
+# 2026-11-01 补（用户要求）：
+#   产品最大的卖点之一是「点开提案 → 看到这条建议依据的是**哪几条真实评价**」✅
+#   而 `action_proposal.evidence_refs` 只有 `{"issue_cluster": "<uuid>"}` ✅
+#     → 只到簇这一层，**没有原文** ✅ ✗ → 前端"展开依据"做不了 ✅
+#   ⚠️ `record.content_clean` 在**入库时已做 PII 脱敏** ✅（`ingress/pii.py`）
+#      → 可以直接给前端 ✅（`record` 表**没有** `content_raw` 列，核对过 ✅）
+@router.get("/clusters/{cluster_id}/reviews")
+def list_cluster_reviews(
+    cluster_id: str,
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    only_negative: bool = Query(False, description="只看差评（rating ≤ 2）"),
+    user: AuthUser = Depends(get_current_user),
+):
+    """某个问题簇的**成员评价原文**（按代表性 + 时间排序）。
+
+    为什么按"代表性"排：
+        `cluster_member.is_representative` 标的是"这条是簇的代表样本" ✅
+        → 展开依据时，先看代表样本比"最新一条"有用得多 ✅
+    """
+    from uuid import UUID
+
+    from sqlalchemy import func, select
+
+    from hub.persistence.db import get_session
+    from hub.persistence.models import (ClusterMember, IssueCluster, Record,
+                                        ReviewTopic)
+
+    try:
+        cid = UUID(cluster_id)
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail={"code": "BAD_ID",
+                                    "message": "cluster_id 不是合法 UUID",
+                                    "trace_id": _trace_id(request)}) from None
+
+    with get_session() as s:
+        cl = s.get(IssueCluster, cid)
+        if cl is None:
+            # 不存在 → 404（**不要返回空数组**，否则前端以为"这个簇没评价" ✅）
+            raise HTTPException(status_code=404,
+                                detail={"code": "NOT_FOUND",
+                                        "message": f"簇不存在：{cluster_id}",
+                                        "trace_id": _trace_id(request)})
+
+        stmt = (select(ClusterMember, Record)
+                .join(Record, Record.id == ClusterMember.record_id)
+                .where(ClusterMember.cluster_id == cid))
+        cnt = (select(func.count()).select_from(ClusterMember)
+               .where(ClusterMember.cluster_id == cid))
+        if only_negative:
+            stmt = stmt.where(Record.rating <= 2)
+            cnt = (select(func.count()).select_from(ClusterMember)
+                   .join(Record, Record.id == ClusterMember.record_id)
+                   .where(ClusterMember.cluster_id == cid, Record.rating <= 2))
+        total = int(s.scalar(cnt) or 0)
+
+        rows = s.execute(
+            stmt.order_by(ClusterMember.is_representative.desc(),
+                          Record.review_time.desc())
+            .offset(offset).limit(limit)).all()
+
+        # topic / severity 现查（避免 N+1 ✅）
+        rids = [r.id for _m, r in rows]
+        tp: dict = {}
+        if rids:
+            for rid, t, sev in s.execute(
+                    select(ReviewTopic.record_id, ReviewTopic.topic,
+                           ReviewTopic.severity).where(
+                        ReviewTopic.record_id.in_(rids))).all():
+                tp[rid] = (t, sev)
+
+        items = []
+        for m, r in rows:
+            t, sev = tp.get(r.id, (None, None))
+            items.append({
+                "record_id": str(r.id),
+                "platform": r.platform,
+                "platform_spu_id": r.platform_spu_id,
+                "rating": r.rating,
+                "review_time": r.review_time.isoformat() if r.review_time else None,
+                "content": r.content_clean or "",
+                "topic": t,
+                "severity": float(sev) if sev is not None else None,
+                "is_representative": bool(m.is_representative),
+            })
+        label = cl.label
+    return {"cluster_id": str(cid), "label": label, "total": total,
+            "limit": limit, "offset": offset, "items": items}

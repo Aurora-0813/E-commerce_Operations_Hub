@@ -169,18 +169,34 @@ def _execute(call: ToolCall, ctx: CallContext, spec, args: dict,
         return _reject(call, ctx, DenyCode.RATE_LIMITED, {"reason": "占位失败"}, t0)
 
     # ---------- 执行（带重试）----------
+    # ══════════════════════════════════════════════════════════════
+    #  ⚠️ **这里要埋 span**（2026-11-01 加）
+    # ══════════════════════════════════════════════════════════════
+    # **不埋会怎样**：`trace_span` 里只有 `llm.chat` 和 `vision.extract` ✅
+    #   → agent 的 3 次工具调用（query_cluster / query_reviews / query_history）**全没有记录** ✅
+    #   → 「每步 token 与耗时」只能看到 LLM 那一条 ✅ ✗
+    #   → 也无法回答"这次 agent 花在查数据上多久、花在模型上多久" ✅
+    # **为什么埋在这一层**：这是**所有工具调用的唯一入口** ✅
+    #   CLI / API / MCP / agent 全部走 `invoke()` → 一处埋点全覆盖 ✅
+    #   （"水表装在管子上，不装在房间里" —— 和 `llm/client.py` 同一个原则 ✅）
+    from hub.core.tracing import span as _span
+
     response, last_error, attempt = None, None, 0
-    for attempt in range(1, faults.MAX_ATTEMPTS + 1):
-        try:
-            faults.maybe_fail(spec, attempt)      # 故障注入（演示用）
-            response = spec.handler(args, ctx)
-            last_error = None
-            break
-        except Exception as e:                    # noqa: BLE001
-            last_error = e
-            if attempt < faults.MAX_ATTEMPTS:
-                print(f"    [重试] {spec.name} 第 {attempt} 次失败：{e}")
-                faults.backoff_sleep(attempt)
+    with _span(f"tool.{spec.name}", kind="tool",
+               risk=spec.risk_level, idempotent=bool(spec.idempotent)) as _sp:
+        for attempt in range(1, faults.MAX_ATTEMPTS + 1):
+            try:
+                faults.maybe_fail(spec, attempt)      # 故障注入（演示用）
+                response = spec.handler(args, ctx)
+                last_error = None
+                break
+            except Exception as e:                    # noqa: BLE001
+                last_error = e
+                if attempt < faults.MAX_ATTEMPTS:
+                    print(f"    [重试] {spec.name} 第 {attempt} 次失败：{e}")
+                    faults.backoff_sleep(attempt)
+        _sp.add(attempts=attempt, ok=last_error is None,
+                error=(type(last_error).__name__ if last_error else None))
 
     if last_error is not None:
         # 重试耗尽：不知道写没写进去 → 直接死信 + 等人工核对（不瞎补偿）

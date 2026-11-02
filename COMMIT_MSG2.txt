@@ -1,0 +1,139 @@
+feat(阶段7): 前端全套（10 页）+ 后端修 9 个问题 + E2E 34 条断言
+
+== 一、前端全套（新增 frontend/，58 个文件）==
+
+技术栈：Vue3 `<script setup lang="ts">` + TS strict（禁 any）+ Vite 8 +
+Element Plus 2.14 + Pinia 4 + Vue Router 5 + axios 1.21 +
+**echarts 6 + vue-echarts 8** + **openapi-typescript**（类型从 /api/openapi.json 生成，2805 行）
+
+10 个页面（**全部接真接口，零 mock**）：
+  0 登录      品牌区 + 演示账号一键填 + 登录后跳 redirect
+  1 工作台    AI 日报（`available:false` 走空态）+ 4 KPI（tabular-nums）
+              + P 档环形 + 待批趋势 + 要我做/等窗口/知会 + 60 秒轮询
+  2a 待批提案 状态筛选 + 分页 + **operator 看不到「批准」**（UI 隐藏，API 仍 403 ✅）
+  2b 提案详情 **三栏：内容 / 依据（展开到真实评价原文 + 关键词高亮）/ 风险与决定**
+              + 该簇周趋势 + 拒绝抽屉（空原因按钮禁用 ✅）
+  3 问题全景 ⑥⑦⑧⑩⑨⑪ 六图 + 簇明细表 + **导出 xlsx（真下载）**
+  4 复盘报告 汇总四卡 + 「为什么不现在就下结论」+ effect 区间条 + 导出
+  5 Agent     提交(202) → 轮询 → 轨迹 → **token（读 agent_run.tokens_in/out）** → 采纳
+  6 运维台    健康/门禁 + 日志（可按动作筛）+ **危险操作二次确认**
+  7 通知中心  unread + 类型筛选 + 标已读（已读则灰）
+  8 知识库    **effective 标记** + 新建 DRAFT + 发布（supervisor）
+
+基建：
+  · `src/api/client.ts`  **axios 唯一入口** —— 401/403/409/422/413/503 分开处理
+      · 401 清 token + 跳登录（不弹 toast）
+      · 403 **不跳登录**（是角色问题）
+      · **409 不当红错弹**（这是我们的幂等：ALREADY_RUNNING 带 run_id ✅）
+  · `src/persistence` 风格的 `stores/{user,app,platform}.ts`
+  · `src/config/{layout,platform,menu}.ts` —— 尺寸/配色/菜单**唯一来源**
+  · `src/styles/{variables,theme,index}.scss` —— SCSS 变量 + CSS 自定义属性双轨
+      · 暗色同时改 Element Plus 和自家变量；**尊重 prefers-reduced-motion**
+  · 三态组件：`PageLoading`（骨架屏）/ `EmptyState`（**带"怎么让它有数据"**）/ `ErrorState`（**显示 trace_id**）
+  · 布局：递归菜单 / **matchMedia 自动收起**（卸载时 removeEventListener ✅）/
+         标签页右键（关闭其他/全部/刷新）/ 面包屑从路由 meta 派生
+
+删除：`frontend/src/views/placeholder/index.vue` 已无引用（10 页全部实现）
+
+== 二、后端修的 9 个问题 ==
+
+#1 **簇翻 4 倍（88 → 22）**
+   每跑一次全链，cluster 阶段插 22 个新簇，旧的不删（要留历史 ✅）
+   → 但读接口查了全表 → 前端显示 88 个簇、P0 显示 8 个 ✅ ✗
+   修法：新增 `hub/persistence/current.py`（`current_run_id()` / `current_cluster_ids()`），
+        charts/cluster-tiers、charts/clusters、report 簇导出 **三处按最新 run 过滤**
+        + `/api/charts/clusters` 加 `run_id` 参数 → **可看历史某一次** ✅
+   验证：P0=2 / P1=5 / P2=8 / P3=7 ✅，导出 22 行 ✅
+
+#2 `action_outcome` 571 条 —— **查清不是 bug**
+   `outcome.py:84` 本来就按 `(proposal_id, treat_spu)` 去重；571 ≈ 78 提案 × 7 商品 ✅
+
+#3 **`/api/handle/{id}/trace` 查不到 span**（前端 token 永远 0）
+   三层修复：
+     a) `handle()` 里 **`set_trace_id(ctx.trace_id)`**（原来从没设过 → span 全落 `no-trace`）
+     b) `save()` **沿用当前 trace_id**（原来自己又生成一个 → 和 span 的对不上 ✅）
+     c) 接口三层兜底：精确 trace_id → LIKE run_id 前 8 位 → **时间窗内的 `no-trace` span**
+   最终前端改读 **`agent_run.tokens_in/out`**（权威字段，一直是对的 ✅）
+
+#4 **`ingest` 阶段硬编码 `data/mock/`**
+   `_stage_ingest` 现在支持 `params["files"]`；没传则回退**并在日志里明说**
+   "⚠️ 入队时没有指定 files → 回退到 data/mock 的固定清单（仅本地演示）"
+   → 生产上不会以为"我上传的文件被处理了"其实读的是另一批 ✅
+
+#5 **待批提案无待办（8 条里 7 条点批准 404）**
+   查清：7 条全是测试夹具造的（`trace=exec-test-*` 5 条 + 旧 `propose-*` 2 条）
+   → 标 `SKIPPED`（**不删，保留审计痕迹** ✅）
+   → 给 `check_execute.py` 加收尾函数，以后不再留这种"点进去 404"的死数据
+
+#6 `/api/brief` 加 **`inputs`**（来源指标）—— 部分完成
+   字段有了，但内容是嵌套噪音（`status[0][1][0].n`）
+   **没做完**：要先把 `collect_inputs()` 的展示契约定下来（哪些指标、叫什么名）
+   前端那块已删，不影响任何页面 ✅
+
+#7 **`/api/retro` 加区间**（`effect_point` / `ci_low` / `ci_high` / **`crosses_zero`**）
+   从 `effect` JSONB 里拆出来；后端直接判"跨不跨 0"，前端不用重复逻辑 ✅
+
+#8 **`gateway.invoke` 加 tool span**（`tool.{name}`）
+   埋在 `invoke()` 里（**所有工具调用的唯一入口**，一处埋点全覆盖 ✅）
+   已知：agent 的 3 个读工具**直接调裸函数、绕过网关** → 它们没有 span
+        （功能正常，但要改就得先确认"读工具不需要依据校验" ✅ **待单独一轮**）
+
+#9 **`vision.py` 的 base_url 混用 `/v1`**（**M2 的 50 次 Vision 全部 404**）
+   `llm.base_url` 是 OpenAI 兼容层（必须带 `/v1`），
+   而 Ollama 原生 `/api/chat` **不能带** `/v1` → 拼出 `/v1/api/chat` → 404 ✅ ✗
+   修法：`vision.py` 去掉尾部 `/v1` + `.env` 显式配 `HUB_VISION__BASE_URL`
+   验证：**真调通**（qwen2.5vl:3b，单张 8.9 秒，`defect_type=none/破损/开线/色差/污渍` 都有 ✅）
+
+== 三、新增接口 ==
+
+`POST /api/ingest/images`（**图片包 zip → M2 多模态**）
+   · 只接受 .zip，**≤1GB**（实测真实 `images.zip` 471MB ✅）
+   · `vision="real"`（本地 qwen2.5vl:3b）/ `"mock"`（假标签，只测连通性）
+   · 返回 `images/deduped/processed/skipped/failed/stripped/destroyed/**residual**`
+     `residual` 必须是 0（沙箱零残留 ✅）
+   · 实测：`images=3 processed=1 skipped=231 destroyed=3 residual=0` ✅
+
+== 四、测试 ==
+
+**后端 `--group full`：59/59 全绿（194 秒）**
+  修了 4 个测试：
+   · `check_api_charts` 对比口径改成"当前 run"（簇数语义变了 ✅）
+   · `check_api_write_run` cleanup **连 RUNNING 一起删**（残留会挡 POST /api/runs → 409 ✅）
+   · `check_agent_guard` cleanup 改成**删该簇全部 agent_run**（原来只删 RUNNING/NEEDS_HUMAN，
+     而 `save()` 写的是 DONE → 数到 2 条 ✅）
+   · `check_execute` 加收尾（无主提案标 SKIPPED ✅）
+
+**前端 E2E（Playwright 1.64 + Chromium，新增 `frontend/e2e/`）**
+   · `smoke.mjs`  12 步冒烟 → **34/34 ✅ console 零报错**
+   · `full.mjs`   全按钮 → 覆盖导出/筛选/排序/拒绝校验/通知/知识库新建/危险操作确认
+   装 Playwright 才能真点（之前只能用"字段契约"间接验 ✅）
+
+== 五、E2E 暴露并修掉的前端真 bug ==
+
+① **14 处 `**` 原样显示**（我在 `<template>` 里写了 Markdown 粗体 ✅）
+   → 批量换成 `<b>`（**只改 template，`<script>` 注释不动** ✅）
+② **导出用 `window.open('/api/export/clusters')` → 401**
+   `window.open` 是新标签页 GET，**不带 Authorization** ✅
+   → 改成 axios 拿 blob + 造下载链接 ✅（E2E 验证"真下载了" ✅）
+③ **`TypeError: trace.value is not iterable`**（整个「轨迹」区块炸掉）
+   `/trace` 返回 `{items:[...]}`，我当成数组 ✅ → `tRes.data?.items ?? []` ✅
+④ **`NameError: ActionProposal`** → 采纳 **500**
+   加"提交后重读状态"时忘了 import（提案建了、执行了、最后读状态崩 ✅）
+⑤ **`Cannot destructure property 'type' of 'vnode'`**（重复多条）
+   `ElTooltip` 包 `ElIcon` 放进 `ElMenuItem` → 虚拟节点被丢弃 ✅
+   → 改用 `ElMenuItem` 自带的 `title` 属性 ✅
+
+== 六、新增文档 ==
+
+· `docs/前端Prompt_批1.md`  —— 前端生成用的完整 prompt（含"只准用 43 个接口"约束）
+· `docs/前端实测手册.md`    —— 按**链路**走的自测清单（不是按页面念功能）
+· `.gitignore` 加 `data/demo_new/`（**1990MB**）和 `frontend/e2e/shots*/`（产物）
+
+== 七、这一轮的教训（都记进台账）==
+
+· **中文文案里的引号必须用「」** —— 我用 Python 脚本改代码时**第 6 次**因此语法错 ✅
+  → 以后改代码用 `edit` 工具，不用"Python 脚本里塞中文字符串"
+· **不能假设"点了 10 秒内会完成"** —— agent 取决于**队列里有没有 worker** ✅
+· **测试清理不能用业务条件删** —— `where(row_kept==0)` 差点删掉 54 个真实批次 ✅
+  （外键救的）
+· **局部 import 在别的函数里看不到** —— `_current_trace_id` 必须模块级 ✅

@@ -68,13 +68,21 @@ def main() -> int:
         check(f"{ep} 有 items", "items" in j, str(list(j.keys()))[:60])
 
     # ---------- [3] 口径自洽 ----------
-    print("\n[3] cluster-tiers 的簇数之和 == 库里簇总数")
+    # ⚠️ **2026-11-01 改**：`cluster-tiers` 现在**只算"当前这一次"的簇**
+    #    （每跑一次全链都会插一批新的、旧的留作历史 ✅）
+    #    → 所以对比对象是 **当前 run 的簇数**，不是全表 ✅
+    #    → 同时验证 `clusters` 接口返回的也是同一批（口径一致 ✅）
+    print("\n[3] cluster-tiers 的簇数之和 == 当前 run 的簇数")
     from sqlalchemy import func, select
 
+    from hub.persistence.current import current_run_id
     from hub.persistence.db import get_session
     from hub.persistence.models import IssueCluster
     with get_session() as s:
-        total = int(s.scalar(select(func.count()).select_from(IssueCluster)) or 0)
+        rid = current_run_id(s)
+        total = int(s.scalar(
+            select(func.count()).select_from(IssueCluster)
+            .where(IssueCluster.run_id == rid)) or 0)
     r = c.get("/api/charts/cluster-tiers", headers=H)
     got = sum(x["clusters"] for x in r.json()["items"])
     check("两数相等", got == total, f"{got} vs {total}")

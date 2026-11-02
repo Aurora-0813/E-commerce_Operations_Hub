@@ -1,0 +1,109 @@
+// ══════════════════════════════════════════════════════════════
+//  SCSS 变量与 mixin（**编译期**）
+//  ⚠️ 这个文件被 vite 的 `additionalData` 注入到每个文件里
+//     → **只能放变量和 mixin**，不能放会产出 CSS 的规则 ✅
+//       否则每个 .vue 都会复制一份那几条 CSS ✅ ✗
+//  ⚠️ 运行期要变的（主题色/暗色）**不放这里** → 放 CSS 自定义属性（theme.scss）
+// ══════════════════════════════════════════════════════════════
+
+// ---------- 颜色（编译期常量）----------
+$brand: #409eff;
+$success: #67c23a;
+$warning: #e6a23c;
+$danger: #f56c6c;
+$info: #909399;
+
+// 侧边栏（深色 #1f2d3d 系）
+$sider-bg: #1f2d3d;
+$sider-bg-darker: #18222d;
+$sider-text: #bfcbd9;
+$sider-text-active: #ffffff;
+
+// 中性色
+$text-primary: #303133;
+$text-regular: #606266;
+$text-secondary: #909399;
+$text-placeholder: #c0c4cc;
+$border-base: #dcdfe6;
+$border-light: #ebeef5;
+$fill-light: #f5f7fa;
+
+// ---------- 尺寸 ----------
+$sider-width: 240px;
+$sider-collapsed-width: 64px;
+$navbar-height: 56px;
+$tabs-height: 40px;
+
+// 间距（8px 栅格）
+$space-xs: 4px;
+$space-sm: 8px;
+$space-md: 16px;
+$space-lg: 24px;
+$space-xl: 32px;
+
+// 圆角
+$radius-sm: 4px;
+$radius-base: 8px;
+$radius-lg: 12px;
+
+// 阴影
+$shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06);
+$shadow-hover: 0 4px 16px rgba(0, 0, 0, 0.1);
+
+// 过渡
+$duration-fast: 150ms;
+$duration-base: 200ms;
+
+// ---------- mixin ----------
+/// 卡片：圆角 8 + 轻阴影（用户 prompt 指定）
+@mixin card {
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: $radius-base;
+  box-shadow: $shadow-card;
+}
+
+/// 等宽数字：KPI 切换数据时不跳动
+/// 用户 prompt 硬要求 `font-variant-numeric: tabular-nums`
+@mixin tabular-nums {
+  font-variant-numeric: tabular-nums;
+  -moz-font-feature-settings: 'tnum';
+  font-feature-settings: 'tnum';
+}
+
+/// 单行省略
+@mixin ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/// 多行省略
+@mixin ellipsis-lines($lines: 2) {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: $lines;
+  -webkit-box-orient: vertical;
+}
+
+/// 滚动条（细一点，别抢眼）
+@mixin thin-scrollbar {
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: var(--el-border-color);
+    border-radius: 3px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/// 尊重系统的"减少动效"设置（无障碍硬要求）
+@mixin motion-safe {
+  @media (prefers-reduced-motion: no-preference) {
+    @content;
+  }
+}

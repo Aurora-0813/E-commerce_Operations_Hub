@@ -153,9 +153,12 @@ def main() -> int:
         from hub.persistence.models import AgentRun
         from sqlalchemy import delete
         with get_session() as s:
-            s.execute(delete(AgentRun).where(
-                AgentRun.cluster_id == c.id,
-                AgentRun.status.in_(("RUNNING", "NEEDS_HUMAN"))))
+            # ⚠️ **必须删这个簇的全部 agent_run**（2026-11-01 修）
+            #    原来只删 RUNNING / NEEDS_HUMAN ✅
+            #    → 但 `save()` 写进去的是 **DONE** ✅
+            #    → 再跑一次就数到 2 条 → "库里只有 1 条" 失败 ✅ ✗
+            #    这是**测试夹具的清理不彻底**，不是幂等坏了 ✅
+            s.execute(delete(AgentRun).where(AgentRun.cluster_id == c.id))
             s.commit()
 
         id1 = save(r)

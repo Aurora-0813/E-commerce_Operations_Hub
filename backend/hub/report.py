@@ -117,8 +117,14 @@ def export_clusters(out_path: str | Path) -> dict:
     from hub.persistence.models import IssueCluster
 
     with get_session() as s:
-        cs = s.scalars(select(IssueCluster)
-                       .order_by(IssueCluster.priority_score.desc().nullslast())
+        # ⚠️ **只导当前这一次的簇**（2026-11-01 修）
+        #    否则会把 4 次跑的 88 个簇全导出来 ✅ ✗
+        from hub.persistence.current import current_run_id
+        rid = current_run_id(s)
+        stmt = select(IssueCluster)
+        if rid is not None:
+            stmt = stmt.where(IssueCluster.run_id == rid)
+        cs = s.scalars(stmt.order_by(IssueCluster.priority_score.desc().nullslast())
                        .limit(MAX_ROWS)).all()
     wb = openpyxl.Workbook()
     ws = wb.active

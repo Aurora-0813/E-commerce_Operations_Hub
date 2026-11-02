@@ -89,9 +89,9 @@ def post_run(body: RunIn, request: Request,
                              "trace_id": _trace_id(request)})
     # 拿到刚建的那条 ✅
     with get_session() as s:
+        # ⚠️ 同理：**不能要求还是 QUEUED**（worker 可能已经跑完了 ✅）
         row = s.scalars(select(PipelineRun).where(
-            PipelineRun.kind == body.kind,
-            PipelineRun.status == "QUEUED").order_by(
+            PipelineRun.kind == body.kind).order_by(
                 PipelineRun.created_at.desc()).limit(1)).first()
         rid, trace = (str(row.id), row.trace_id) if row else (None, None)
     return {"run_id": rid, "trace_id": trace, "status": "QUEUED",
@@ -202,9 +202,15 @@ def post_handle(body: HandleIn, request: Request,
                             {"code": "QUEUE_UNAVAILABLE",
                              "message": "Redis 连不上；任务已写库，等 worker 对账会捡起来",
                              "trace_id": _trace_id(request)})
+    # ⚠️ **不能加 `status == "QUEUED"`**（2026-11-01 修的竞态）
+    #    worker 可能**在我们查之前**就把它抢走并跑完（RUNNING / DONE ✅）
+    #    → 加了 status 过滤就会查不到 → `run_id: null` ✅
+    #    → 前端拿 null 去轮询 `/api/runs/null` → **400** ✅ ✗
+    # 改成"该 kind **最新的一条**"：`kind` 在活跃期内是唯一的 ✅，
+    # 而 `created_at DESC` 保证拿到的是**刚建的那条** ✅
     with get_session() as s:
         row = s.scalars(select(PipelineRun).where(
-            PipelineRun.kind == kind, PipelineRun.status == "QUEUED").order_by(
+            PipelineRun.kind == kind).order_by(
                 PipelineRun.created_at.desc()).limit(1)).first()
         rid = str(row.id) if row else None
     return {"run_id": rid, "cluster_id": cid, "status": "QUEUED",

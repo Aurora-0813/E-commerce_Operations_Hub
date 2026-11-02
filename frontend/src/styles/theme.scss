@@ -1,0 +1,72 @@
+// ══════════════════════════════════════════════════════════════
+//  主题：Element Plus 覆盖 + 暗色（**运行期 CSS 自定义属性**）
+//  ⚠️ 这个文件**会产生 CSS**，只在 main.ts import 一次 ✅
+// ══════════════════════════════════════════════════════════════
+
+// ---------- 我们自己的一套 CSS 变量（浅色）----------
+// 为什么除了 Element 的变量还要自己一套：
+//   Element 的变量是**组件内部**用的；我们自己的卡片/侧边栏/图表要能统一取用 ✅
+:root {
+  --hub-brand: #{$brand};
+  --hub-sider-bg: #{$sider-bg};
+  --hub-sider-bg-darker: #{$sider-bg-darker};
+  --hub-sider-text: #{$sider-text};
+  --hub-sider-text-active: #{$sider-text-active};
+
+  --hub-bg-page: #f5f7fa;
+  --hub-bg-card: #ffffff;
+  --hub-border: #dcdfe6;
+  --hub-border-light: #ebeef5;
+
+  --hub-text-primary: #303133;
+  --hub-text-regular: #606266;
+  --hub-text-secondary: #909399;
+
+  --hub-radius: #{$radius-base};
+  --hub-shadow-card: #{$shadow-card};
+  --hub-shadow-hover: #{$shadow-hover};
+
+  --hub-space-xs: #{$space-xs};
+  --hub-space-sm: #{$space-sm};
+  --hub-space-md: #{$space-md};
+  --hub-space-lg: #{$space-lg};
+  --hub-space-xl: #{$space-xl};
+}
+
+// ---------- Element Plus 主题覆盖 ----------
+//   ⚠️ 只覆盖"品牌相关"的少量变量；**不要**把 Element 的整套变量重写一遍
+//      （那样 Element 升级就会大面积错位 ✅）
+:root {
+  --el-color-primary: #{$brand};
+  --el-border-radius-base: #{$radius-base};
+  --el-border-radius-small: #{$radius-sm};
+
+  // 表格：**表头浅灰底 + 行高舒适**（用户 prompt 要求）
+  --el-table-header-bg-color: #fafafa;
+  --el-table-row-hover-bg-color: #f5f7fa;
+  --el-table-border-color: #{$border-light};
+}
+
+// ---------- 暗色：**Element Plus 和我们的变量一起切** ----------
+//   `html.dark` 由 `stores/app.ts` 的 `applyDark()` 加上 ✅
+html.dark {
+  --hub-bg-page: #141414;
+  --hub-bg-card: #1d1e1f;
+  --hub-border: #414243;
+  --hub-border-light: #363637;
+
+  --hub-text-primary: #e5eaf3;
+  --hub-text-regular: #cfd3dc;
+  --hub-text-secondary: #a3a6ad;
+
+  --hub-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --hub-shadow-hover: 0 4px 16px rgba(0, 0, 0, 0.55);
+
+  // 侧边栏在暗色下再深一档，保持层次
+  --hub-sider-bg: #141c24;
+  --hub-sider-bg-darker: #0f151b;
+
+  --el-table-header-bg-color: #262727;
+  --el-table-row-hover-bg-color: #262727;
+  --el-bg-color-page: #141414;
+}
