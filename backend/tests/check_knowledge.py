@@ -54,8 +54,12 @@ def main() -> int:
     kid = K.create("测试-质量口径", "先道歉，再解释掉色原因，最后给出补救方案 ✅",
                    topic="quality")
     txt, h = K.render_patches("quality")
-    check("DRAFT 时段落为空", txt == "", txt[:40])
-    check("DRAFT 时 hash 为空", h == "", h)
+    # ⚠️ **不能断言「段落为空」**（2026-11-02 修）
+    #    库里可能已经有**别的 PUBLISHED 条目**（别的测试/演示造的 ✅）
+    #    → 段落当然不空 ✅ ✗
+    #    正确断言：**「我新建的这条 DRAFT」不在段落里** ✅
+    check("DRAFT 时我的条目不在段落里", "测试-质量口径" not in txt, txt[:60])
+    check("DRAFT 时不会出现我的正文", "先道歉，再解释掉色原因" not in txt)
     # 确认它真的在库里（只是没发布 ✅）
     with get_session() as s:
         from uuid import UUID
@@ -69,6 +73,7 @@ def main() -> int:
     check("发布成功", r.get("ok") is True, str(r))
     txt, h1 = K.render_patches("quality")
     check("段落非空", bool(txt), txt[:50].replace("\n", " "))
+    _ = h1  # h1 是发布后的 hash（后面的对比用 ✅）
     check("段落里含标题", "测试-质量口径" in txt)
     check("段落里含正文", "先道歉" in txt)
     check("带版本号", "v2" in txt, txt[:60].replace("\n", " "))

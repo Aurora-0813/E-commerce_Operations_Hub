@@ -241,6 +241,17 @@ const main = async () => {
     check('有「危险操作」', ob.includes('危险操作'))
     check('日志表有行', await page.locator('.el-table__row').count() > 0)
 
+    // ---------- ⑭ 图片复核页（2026-11-03 加）----------
+    console.log('\n[14] 图片复核页')
+    await sidebarGo(page, '图片复核')
+    await page.waitForTimeout(1500)
+    await shot(page, '16_image_review')
+    const rb = (await page.textContent('body')) ?? ''
+    check('进了 /images', page.url().includes('/images'), page.url())
+    check('有「图片复核」标题', rb.includes('图片复核'))
+    check('KPI 有「待复核」', rb.includes('待复核'))
+    check('说明里写了「不直接进赔偿决策」', rb.includes('赔偿'))
+
     // ---------- ⑬ 数据接入（xlsx / 图片包 两个 tab）----------
     console.log('\n[13] 数据接入（两个 tab）')
     await sidebarGo(page, '数据接入')

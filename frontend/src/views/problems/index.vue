@@ -16,9 +16,11 @@ import { Download, Refresh } from '@element-plus/icons-vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { BarChart, PieChart, RadarChart, ScatterChart } from 'echarts/charts'
+// ⚠️ **`LineChart` 也要注册**（2026-11-02 修）：我给趋势图加了 line series ✅
+import { BarChart, LineChart, PieChart, RadarChart, ScatterChart } from 'echarts/charts'
+// ⚠️ **`TitleComponent` 也要注册**（2026-11-02 修）：我给雷达图加了 title（标簇名 ✅）
 import {
-  GridComponent, LegendComponent, RadarComponent, TooltipComponent,
+  GridComponent, LegendComponent, RadarComponent, TitleComponent, TooltipComponent,
 } from 'echarts/components'
 
 import {
@@ -35,8 +37,8 @@ import ErrorState from '@/components/ErrorState.vue'
 import PageLoading from '@/components/PageLoading.vue'
 import { useAppStore } from '@/stores/app'
 
-use([CanvasRenderer, PieChart, BarChart, RadarChart, ScatterChart,
-     GridComponent, TooltipComponent, LegendComponent, RadarComponent])
+use([CanvasRenderer, PieChart, BarChart, LineChart, RadarChart, ScatterChart,
+     GridComponent, TooltipComponent, LegendComponent, RadarComponent, TitleComponent])
 
 const router = useRouter()
 const app = useAppStore()
@@ -79,11 +81,30 @@ async function load(): Promise<void> {
   if (selected.value) void loadFactors(selected.value)
 }
 
+/**
+ * 拉四因子
+ * ⚠️ **2026-11-02 修**：用户反馈「换了簇，四因子图每个都一样」✅
+ *    原因有两个可能：① 请求没重发 ② 重发了但图表没重绘
+ *    修法：**先清空（让图消失）→ 再拉 → 图上标出当前簇名** ✅
+ *         这样"切了没生效"一眼能看出来 ✅
+ */
+const factorsLoading = ref(false)
+
+/** 数据里最新的日期（给空态提示用 ✅）*/
+const latestDate = computed<string>(() => {
+  const ds = trend.value.map((d) => d.date).filter(Boolean) as string[]
+  if (!ds.length) return ''
+  return ds.reduce((a, b) => (a > b ? a : b), '')
+})
 async function loadFactors(cid: string): Promise<void> {
+  factorsLoading.value = true
+  factors.value = null          // **先清空**（否则看起来"没变" ✅）
   try {
     factors.value = await getFactors(cid)
   } catch {
     factors.value = null
+  } finally {
+    factorsLoading.value = false
   }
 }
 
@@ -134,6 +155,9 @@ const radar = computed(() => {
   // ⚠️ 这里**不归一化**：直接把真实数值放进雷达（量纲不同也会显示，但**不造假** ✅）
   //    后端 `note` 里明确写了"未归一化：这些是库里的原始输入" ✅
   return {
+    // **标题带上簇名**（用户说「每个都一样」→ 现在能看出是哪个簇 ✅）
+    title: { text: f.label, left: 'center', top: 0,
+             textStyle: { fontSize: 12, color: '#606266' } },
     tooltip: { trigger: 'item' },
     radar: {
       indicator: [
@@ -142,7 +166,8 @@ const radar = computed(() => {
         { name: '优先级分', max: Math.max((i.priority_score ?? 1) * 1.2, 1) },
         { name: '涉及商品', max: Math.max((clusters.value.find((c) => c.id === f.cluster_id)?.spus ?? 3) * 1.5, 3) },
       ],
-      radius: '62%',
+      radius: '58%',
+      center: ['50%', '58%'],
       axisLabel: { fontSize: 10, color: '#909399' },
       splitLine: { lineStyle: { color: '#ebeef5' } },
     },
@@ -169,16 +194,22 @@ const scatter = computed(() => ({
     formatter: (p: { data: [number, number, string, number] }) =>
       `${p.data[2]}<br/>价格 ¥${p.data[0]}<br/>差评率 ${(p.data[1] * 100).toFixed(1)}%`,
   },
-  grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
-  xAxis: { type: 'value', name: '价格', nameTextStyle: { fontSize: 11 },
+  // ⚠️ **2026-11-02 修**：`left: 8` 太窄 → Y 轴名字被裁 ✅
+  //    而且坐标轴名要**留出空间**（`nameGap` + `nameLocation` ✅）
+  grid: { left: 56, right: 28, top: 32, bottom: 32, containLabel: true },
+  xAxis: { type: 'value', name: '价格（元）', nameLocation: 'middle', nameGap: 26,
+           nameTextStyle: { fontSize: 11, color: '#909399' },
            axisLabel: { fontSize: 11, color: '#909399' },
            splitLine: { lineStyle: { color: '#ebeef5' } } },
-  yAxis: { type: 'value', name: '差评率', nameTextStyle: { fontSize: 11 },
+  yAxis: { type: 'value', name: '差评率', nameLocation: 'middle', nameGap: 42,
+           nameTextStyle: { fontSize: 11, color: '#909399' },
            axisLabel: { fontSize: 11, color: '#909399', formatter: (v: number) => `${(v * 100).toFixed(0)}%` },
            splitLine: { lineStyle: { color: '#ebeef5' } } },
   series: [{
     type: 'scatter',
-    symbolSize: (d: [number, number, string, number]) => Math.min(28, 6 + Math.sqrt(d[3]) * 2),
+    // ⚠️ **2026-11-02 修**：原来 `Math.sqrt(count)*2` 最大 28px → 用户说「散点太大」✅
+    //    改成 **8~14px**（有区分度但不糊成一片 ✅）
+    symbolSize: (d: [number, number, string, number]) => 8 + Math.min(6, (d[3] ?? 0) / 20),
     data: prices.value.map((x) => [x.price, x.review_rate, x.title, x.review_count]),
     itemStyle: { opacity: 0.7 },
   }],
@@ -286,7 +317,8 @@ function tierType(t: string): 'danger' | 'warning' | 'primary' | 'info' {
             <span v-if="factors" class="problems__note">{{ factors.note }}</span>
           </div>
         </template>
-        <EmptyState v-if="!radar" compact description="选一个簇看看它的四因子" />
+        <div v-if="factorsLoading" class="problems__muted">正在加载四因子…</div>
+        <EmptyState v-else-if="!radar" compact description="选一个簇看看它的四因子" />
         <VChart v-else class="problems__chart problems__chart--sm" :option="radar" autoresize />
       </ElCard>
 
@@ -304,8 +336,12 @@ function tierType(t: string): 'danger' | 'warning' | 'primary' | 'info' {
             <span class="problems__card-title">⑨ 差评率趋势（近 {{ app.rangeDays }} 天）</span>
           </template>
           <!-- ⚠️ 这个接口现在**可能是空数组** → 走空态，不画空图 ✅ -->
-          <EmptyState v-if="!trend.length" compact description="这段时间没有差评率数据"
-                      hint="按天统计需要有对应日期的评价" />
+          <!-- ⚠️ **2026-11-02 修**：把「为什么空」说清楚 ✅ -->
+          <!--    用户反馈「差评率趋势没有图」→ 实测是**时间范围选错了** ✅ -->
+          <!--    数据最新到 2026-10-21，而默认「近 7 天」= 10-26~11-02 → 一条都没有 ✅ -->
+          <EmptyState v-if="!trend.length" compact
+                      :description="`近 ${app.rangeDays} 天没有差评率数据`"
+                      :hint="`数据的最新日期是 ${latestDate || '未知'}。可以切换成「近 30 天」再看，或者先导入新数据 ✅`" />
           <VChart v-else class="problems__chart" :option="lineTrend" autoresize />
         </ElCard>
       </div>
@@ -420,14 +456,15 @@ function tierType(t: string): 'danger' | 'warning' | 'primary' | 'info' {
   }
 
   &__chart {
-    height: 260px;
+    height: 300px;
 
     &--sm {
       height: 220px;
     }
   }
 
-  @media (max-width: 1100px) {
+  // ⚠️ **2026-11-02 修**：两图并排时 1fr 太窄 → 1400px 以下改单列 ✅
+  @media (max-width: 1400px) {
     &__row {
       grid-template-columns: 1fr;
     }

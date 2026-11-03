@@ -17,6 +17,8 @@ import { getAudit, type AuditRow } from '@/api/data'
 import { ingestFile, postRun, replayDlq, type IngestResult } from '@/api/write'
 import { ApiError } from '@/api/client'
 import EmptyState from '@/components/EmptyState.vue'
+import LabelTag from '@/components/LabelTag.vue'
+import { ACTION } from '@/config/labels'
 import ErrorState from '@/components/ErrorState.vue'
 
 // ---------- 日志 ----------
@@ -312,7 +314,11 @@ const evalPassed = computed(() => {
           </template>
         </ElTableColumn>
         <ElTableColumn prop="actor" label="谁" width="180" show-overflow-tooltip />
-        <ElTableColumn prop="action" label="动作" width="180" />
+        <ElTableColumn label="动作" width="180">
+          <template #default="{ row }">
+            <LabelTag :dict="ACTION" :value="row.action" />
+          </template>
+        </ElTableColumn>
         <ElTableColumn prop="resource" label="对象" min-width="200" show-overflow-tooltip />
         <ElTableColumn prop="ip" label="IP" width="120" />
       </ElTable>

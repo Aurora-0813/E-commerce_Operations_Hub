@@ -19,7 +19,12 @@ export interface PricePoint {
   price: number; review_rate: number; review_count: number
 }
 export interface TrendPoint { date: string; bad?: number; total?: number; rate?: number }
-export interface WeekPoint { week: string; n: number }
+/**
+ * 簇的周趋势
+ * ⚠️ **字段名是 `reviews`，不是 `n`**（2026-11-02 修）
+ *    我原来写 `n` → `d.n` 全是 undefined → 柱子高度 0 → 看起来「没有图」✅ ✗
+ */
+export interface WeekPoint { week: string; reviews: number }
 
 /** ① P 档环形 */
 export async function getClusterTiers(): Promise<TierItem[]> {
@@ -99,9 +104,16 @@ export interface RetroItem {
   metrics_before: Record<string, number> | null
   metrics_after: Record<string, number> | null
 }
-export async function getRetro(): Promise<RetroItem[]> {
-  const { data } = await http.get<{ items: RetroItem[] }>('/api/retro')
-  return data.items ?? []
+/**
+ * 复盘列表
+ * ⚠️ **返回 `{total, items}`**（2026-11-02 修）
+ *    原来只返回 `items` ✅ → 前端拿 `items.length` 当"多少个动作在等窗口"
+ *    → 而接口 `limit=50` → **531 个被显示成 50** ✅ ✗
+ */
+export async function getRetro(limit = 200): Promise<{ total: number; items: RetroItem[] }> {
+  const { data } = await http.get<{ total?: number; items: RetroItem[] }>(
+    '/api/retro', { params: { limit } })
+  return { total: data.total ?? (data.items?.length ?? 0), items: data.items ?? [] }
 }
 
 // ══════════════════ 提案 ══════════════════
@@ -123,6 +135,13 @@ export interface ProposalDetail extends ProposalRow {
   /** ⚠️ 只有 `[{issue_cluster: uuid}]` —— **原文要靠 `/clusters/{id}/reviews`** ✅ */
   evidence_refs: Array<{ issue_cluster?: string }>
   dry_run: boolean
+  /**
+   * **这条提案有没有待批任务**（2026-11-02 加）
+   * `true` 才能批准；`false`/`null` 说明没提交网关 → 前端要禁用按钮 ✅
+   */
+  has_pending_task?: boolean | null
+  /** 不能批准时的人话原因（后端给的 ✅）*/
+  approve_blocked_reason?: string | null
   experience: Array<{ tool?: string; topic?: string; positive?: number; negative?: number }>
 }
 

@@ -8,13 +8,15 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  ElButton, ElCard, ElMessage, ElOption, ElPagination, ElSelect, ElTag,
+  ElButton, ElCard, ElMessage, ElOption, ElPagination, ElSelect,
 } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 
 import { getNotify, type NotifyItem } from '@/api/read'
 import { readNotify } from '@/api/write'
 import EmptyState from '@/components/EmptyState.vue'
+import LabelTag from '@/components/LabelTag.vue'
+import { EVENT } from '@/config/labels'
 import ErrorState from '@/components/ErrorState.vue'
 
 const router = useRouter()
@@ -165,9 +167,7 @@ const unreadText = computed(() => (unread.value > 0 ? `${unread.value} 条未读
         <div v-for="it in items" :key="it.id" class="notify__item"
              :class="{ 'is-unread': it.status !== 'READ' }" @click="open(it)">
           <div class="notify__item-left">
-            <ElTag :type="evMeta(it.event_type).type" size="small" effect="dark">
-              {{ evMeta(it.event_type).text }}
-            </ElTag>
+            <LabelTag :dict="EVENT" :value="it.event_type" effect="dark" />
             <span class="notify__item-res">{{ it.resource_id.slice(0, 12) }}</span>
           </div>
 

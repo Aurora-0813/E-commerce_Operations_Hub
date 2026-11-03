@@ -8,7 +8,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   ElButton, ElCard, ElMessage, ElOption, ElPagination, ElSelect,
-  ElTable, ElTableColumn, ElTag,
+  ElTable, ElTableColumn,
 } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 
@@ -16,6 +16,8 @@ import { getProposals, type ProposalRow } from '@/api/data'
 import { approveProposal } from '@/api/write'
 import { ApiError } from '@/api/client'
 import EmptyState from '@/components/EmptyState.vue'
+import LabelTag from '@/components/LabelTag.vue'
+import { RISK, STATUS, TOOL, TOPIC } from '@/config/labels'
 import ErrorState from '@/components/ErrorState.vue'
 import { useUserStore } from '@/stores/user'
 
@@ -55,27 +57,6 @@ watch([page, status], () => void load())
 watch(size, () => { page.value = 1; void load() })
 
 // ---------- 展示 ----------
-const RISK_TYPE: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
-  L0: 'success', L1: 'info', L2: 'warning', L3: 'danger',
-}
-const STATUS_TYPE: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
-  PROPOSED: 'info', PENDING_APPROVAL: 'warning', APPROVED: 'success',
-  EXECUTED: 'success', REJECTED: 'danger', SKIPPED: 'info',
-}
-const STATUS_LABEL: Record<string, string> = {
-  PROPOSED: '待处理', PENDING_APPROVAL: '待批准', APPROVED: '已批准',
-  EXECUTED: '已执行', REJECTED: '已拒绝', SKIPPED: '已跳过',
-}
-const TOOL_LABEL: Record<string, string> = {
-  'review.draft_reply': '生成回复草稿',
-  'listing.update_desc': '修改商品描述',
-  'listing.restore_desc': '回滚描述',
-  'product.update_price': '修改价格',
-}
-const TOPIC_LABEL: Record<string, string> = {
-  quality: '质量', size: '尺码', logistics: '物流', service: '服务',
-  color: '色差', price: '价格',
-}
 
 // ---------- 快捷批准（只有 supervisor 显示）----------
 const actingId = ref('')
@@ -134,28 +115,24 @@ function openDetail(row: ProposalRow): void {
 
       <ElTable v-else v-loading="loading" :data="rows" size="small" stripe
                @row-click="(row: unknown) => openDetail(row as ProposalRow)">
-        <ElTableColumn label="动作" min-width="150">
+        <ElTableColumn label="要做什么" min-width="150">
           <template #default="{ row }">
-            <span class="plist__tool">{{ TOOL_LABEL[row.tool_name] ?? row.tool_name }}</span>
+            <LabelTag :dict="TOOL" :value="row.tool_name" text-only />
           </template>
         </ElTableColumn>
-        <ElTableColumn label="风险" width="76">
+        <ElTableColumn label="风险" width="110">
           <template #default="{ row }">
-            <ElTag :type="RISK_TYPE[row.risk_level] ?? 'info'" size="small" effect="dark">
-              {{ row.risk_level }}
-            </ElTag>
+            <LabelTag :dict="RISK" :value="row.risk_level" effect="dark" />
           </template>
         </ElTableColumn>
-        <ElTableColumn label="状态" width="94">
+        <ElTableColumn label="状态" width="110">
           <template #default="{ row }">
-            <ElTag :type="STATUS_TYPE[row.status] ?? 'info'" size="small">
-              {{ STATUS_LABEL[row.status] ?? row.status }}
-            </ElTag>
+            <LabelTag :dict="STATUS" :value="row.status" />
           </template>
         </ElTableColumn>
-        <ElTableColumn label="问题类型" width="96">
+        <ElTableColumn label="问题类型" width="100">
           <template #default="{ row }">
-            {{ row.topic ? (TOPIC_LABEL[row.topic] ?? row.topic) : '—' }}
+            <LabelTag :dict="TOPIC" :value="row.topic" text-only />
           </template>
         </ElTableColumn>
         <ElTableColumn prop="rationale" label="理由" min-width="260" show-overflow-tooltip />

@@ -11,35 +11,45 @@ import { computed, ref } from 'vue'
 import {
   ElAlert, ElCard, ElMessage, ElOption, ElSelect, ElSwitch, ElTag, ElUpload,
 } from 'element-plus'
-import type { UploadRawFile } from 'element-plus'
 import { PictureFilled } from '@element-plus/icons-vue'
 
-import { ingestImages, type ImageIngestResult } from '@/api/write'
+import {
+  ingestImages, precheckImages,
+  type ImageIngestResult, type PrecheckResp,
+} from '@/api/write'
 import { ApiError } from '@/api/client'
 
 const vision = ref<'real' | 'mock'>('real')
 const force = ref(true)
+
+// ══════════════════════════════════════════════════════════════
+//  预检（2026-11-03 加）—— **先对账，再决定跑不跑**
+// ══════════════════════════════════════════════════════════════
+// **为什么必须这一步**
+//   真包 428 张 x 8.9 秒 约 63 分钟；先跑再发现只匹配上 1 条 = 白烧一小时
+//   → 预检不解压、不调模型、秒回，先让用户看清对账
+const prechecking = ref(false)
+const pre = ref<PrecheckResp | null>(null)
+const pendingFile = ref<File | null>(null)
+
+async function doPrecheck(file: File): Promise<void> {
+  prechecking.value = true
+  pre.value = null
+  pendingFile.value = file
+  try {
+    pre.value = await precheckImages(file)
+  } catch {
+    pre.value = null
+  } finally {
+    prechecking.value = false
+  }
+}
 const uploading = ref(false)
 const pct = ref(0)
 const result = ref<ImageIngestResult | null>(null)
 const errorMsg = ref('')
 
-/** zip 上限 1GB（后端限制 ✅，真实 images.zip 471MB）*/
-const MAX = 1024 * 1024 * 1024
-
-function beforeUpload(file: UploadRawFile): boolean {
-  if (!/\.zip$/i.test(file.name)) {
-    ElMessage.error('图片包只接受 .zip（把图片打包成 zip 再传 ✅）')
-    return false
-  }
-  if (file.size > MAX) {
-    ElMessage.error(`文件 ${(file.size / 1024 / 1024).toFixed(0)}MB，超过 1GB 上限 ✅`)
-    return false
-  }
-  return true
-}
-
-async function doUpload(file: UploadRawFile): Promise<void> {
+async function doUpload(file: File): Promise<void> {
   uploading.value = true
   pct.value = 0
   result.value = null
@@ -100,19 +110,87 @@ const visionHint = computed(() =>
 
         <div class="img-ingest__field img-ingest__field--grow">
           <div class="img-ingest__label">&nbsp;</div>
+          <!-- ⚠️ **先预检，再处理**（2026-11-03 加）
+               真包 428 张 x 8.9 秒 ≈ 63 分钟；先跑再发现"只匹配上 1 条"= 白烧一小时 ✅
+               → 拖进来先调 `/api/ingest/images/precheck`（不解压、不调模型、秒回 ✅）
+               → 用户看完对账，点「确认处理」才真的跑 ✅ -->
           <ElUpload :auto-upload="false" :show-file-list="false"
-                    :before-upload="beforeUpload"
-                    :on-change="(f: { raw?: UploadRawFile }) => f.raw && doUpload(f.raw)"
+                    :before-upload="(f: File) => { void doPrecheck(f); return false }"
                     accept=".zip" :disabled="uploading" drag class="img-ingest__drop">
             <div class="img-ingest__drop-inner">
               <el-icon :size="26" color="#409eff"><PictureFilled /></el-icon>
               <div class="img-ingest__drop-text">
-                {{ uploading ? `上传中 ${pct}%…` : '把图片包 zip 拖到这里（≤1GB）' }}
+                {{ uploading ? `上传中 ${pct}%…` : '把图片包 zip 拖到这里（先对账，不立刻跑 ✅）' }}
               </div>
             </div>
           </ElUpload>
         </div>
       </div>
+
+      <!-- ══════════════════════════════════════════════════════
+           预检对账结果（2026-11-03 加）
+           ══════════════════════════════════════════════════════ -->
+      <ElCard v-if="prechecking || pre" shadow="never" class="img-ingest__pre">
+        <template #header>
+          <div class="img-ingest__result-head">
+            <span class="img-ingest__card-title">① 对账（还没跑模型 ✅）</span>
+            <span class="img-ingest__muted">{{ pendingFile?.name }}</span>
+          </div>
+        </template>
+
+        <div v-if="prechecking" class="img-ingest__muted">正在对账（不解压、不调模型，应该几秒 ✅）…</div>
+
+        <template v-else-if="pre">
+          <!-- 一句人话结论 -->
+          <div class="img-ingest__verdict">{{ pre.verdict }}</div>
+
+          <div class="img-ingest__pre-grid">
+            <div><span class="img-ingest__muted">包里图片</span><b>{{ pre.package_files }}</b></div>
+            <div><span class="img-ingest__muted">有图评价</span><b>{{ pre.reviews_with_image }}</b></div>
+            <div><span class="img-ingest__muted">能对上</span><b class="is-ok">{{ pre.reviews_matched }}</b></div>
+            <div><span class="img-ingest__muted">对不上</span><b :class="pre.reviews_unmatched ? 'is-bad' : ''">{{ pre.reviews_unmatched }}</b></div>
+            <div><span class="img-ingest__muted">匹配到的图</span><b>{{ pre.images_matched }}</b></div>
+            <div><span class="img-ingest__muted">包里多余</span><b>{{ pre.images_unused }}</b></div>
+            <div><span class="img-ingest__muted">预计调模型</span><b>{{ pre.est_calls }} 次</b></div>
+            <div><span class="img-ingest__muted">预计耗时</span><b>{{ (pre.est_seconds / 60).toFixed(1) }} 分钟</b></div>
+          </div>
+
+          <div class="img-ingest__muted">
+            用的匹配规则：<b>{{ pre.tier_text || '（没匹配上）' }}</b>
+            <template v-if="pre.manifest_source">｜manifest：<code>{{ pre.manifest_source }}</code>（{{ pre.manifest_rows }} 行）</template>
+            <template v-if="pre.name_collisions">｜⚠️ 同名冲突 {{ pre.name_collisions }} 张（不同子目录同名 → 不能用于目录匹配）</template>
+          </div>
+
+          <!-- 对不上的样例（**给证据，用户才能自己判断** ✅）-->
+          <div v-if="pre.unmatched_sample.length" class="img-ingest__pre-sample">
+            <div class="img-ingest__muted">对不上的样例（期望的文件名在包里找不到）：</div>
+            <div v-for="s in pre.unmatched_sample.slice(0, 4)" :key="s.review_id" class="img-ingest__pre-row">
+              <code>{{ s.review_id }}</code>
+              <span class="img-ingest__muted">期望：{{ s.expected_files.join(' / ') || '—' }}</span>
+            </div>
+          </div>
+
+          <!-- 缺失的样例（要 N 张只找到 M 张 ✅）-->
+          <div v-if="pre.missing_sample.length" class="img-ingest__pre-sample">
+            <div class="img-ingest__muted">部分缺失（评价要几张、只找到几张）：</div>
+            <div v-for="s in pre.missing_sample.slice(0, 4)" :key="s.review_id" class="img-ingest__pre-row">
+              <code>{{ s.review_id }}</code>
+              <span class="img-ingest__muted">要 {{ s.expected }} 张，只找到 {{ s.found }} 张</span>
+            </div>
+          </div>
+
+          <div class="img-ingest__pre-actions">
+            <ElButton type="primary" :disabled="uploading || pre.reviews_matched === 0"
+                      :loading="uploading" @click="pendingFile && doUpload(pendingFile)">
+              ② 确认处理（{{ pre.est_calls }} 次调用，约 {{ (pre.est_seconds / 60).toFixed(0) }} 分钟）
+            </ElButton>
+            <ElButton :disabled="uploading" @click="pre = null; pendingFile = null">取消</ElButton>
+            <span v-if="pre.reviews_matched === 0" class="img-ingest__hint is-warn">
+              一条都对不上 → 先按上面的提示改命名（或放一份 index.csv）
+            </span>
+          </div>
+        </template>
+      </ElCard>
 
       <div class="img-ingest__hint">{{ visionHint }}</div>
 
@@ -241,6 +319,74 @@ const visionHint = computed(() =>
   &__drop-text {
     font-size: 13px;
     color: var(--hub-text-regular);
+  }
+
+  &__pre {
+    margin-top: $space-md;
+  }
+
+  &__verdict {
+    margin-bottom: $space-sm;
+    padding: $space-sm $space-md;
+    border-radius: $radius-base;
+    font-size: 13px;
+    line-height: 1.7;
+    background: var(--el-color-primary-light-9);
+    border: 1px solid var(--el-color-primary-light-7);
+  }
+
+  &__pre-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: $space-sm;
+    margin-bottom: $space-sm;
+    font-size: 12px;
+
+    div {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px $space-sm;
+      border-radius: $radius-sm;
+      background: var(--hub-bg-hover, #f5f7fa);
+    }
+
+    b {
+      font-size: 16px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .is-ok {
+      color: var(--el-color-success);
+    }
+
+    .is-bad {
+      color: var(--el-color-danger);
+    }
+
+    @media (max-width: 1100px) {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  &__pre-sample {
+    margin-top: $space-sm;
+    font-size: 12px;
+  }
+
+  &__pre-row {
+    display: flex;
+    gap: $space-sm;
+    padding: 2px 0;
+  }
+
+  &__pre-actions {
+    display: flex;
+    align-items: center;
+    gap: $space-sm;
+    margin-top: $space-md;
+    padding-top: $space-sm;
+    border-top: 1px dashed var(--hub-border-light);
   }
 
   &__hint {

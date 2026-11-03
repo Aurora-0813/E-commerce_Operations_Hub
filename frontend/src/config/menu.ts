@@ -43,6 +43,7 @@ export const MENU: MenuItem[] = [
     children: [
       { path: '/proposals', title: '待批提案', icon: 'DocumentChecked' },
       { path: '/agent', title: 'Agent 任务', icon: 'MagicStick' },
+  { path: '/images', title: '图片复核', icon: 'PictureFilled' },
     ],
   },
   { path: '/retro', title: '复盘报告', icon: 'TrendCharts' },

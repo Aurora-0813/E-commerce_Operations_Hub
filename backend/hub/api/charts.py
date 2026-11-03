@@ -194,8 +194,18 @@ def retro(limit: int = Query(50, ge=1, le=200),
     from hub.persistence.models import ActionOutcome
 
     with get_session() as s:
+        # ⚠️ **要返回 total**（2026-11-02 修）
+        #    前端拿 `items.length` 当"多少个动作在等窗口" ✅
+        #    而 `limit=50` → **实际 531 个被截成 50** → 用户看到"观察窗口 50" ✅ ✗
+        from sqlalchemy import func as _f
+        total = int(s.scalar(select(_f.count()).select_from(ActionOutcome)) or 0)
+        # ⚠️ **有结论的排前面**（2026-11-03 修）
+        #    原来只按 `created_at DESC` → 1484 条"等窗口"的会把 68 条
+        #    "有区间的"**挤出前 200** → 前端一条误差棒都看不到 ✅ ✗
         rows = s.scalars(select(ActionOutcome)
-                         .order_by(ActionOutcome.created_at.desc()).limit(limit)).all()
+                         .order_by(ActionOutcome.concluded_at.desc().nullslast(),
+                                   ActionOutcome.created_at.desc())
+                         .limit(limit)).all()
         # ⚠️ **`effect` 是 JSONB**（dict ✅），里面存了 DID 的点估计和区间
         #    （2026-11-01 修）：以前直接返回整个 dict，前端拿不到 `ci_low/ci_high`
         #    → "区间跨不跨 0"的误差棒画不出来 ✅ ✗
@@ -203,7 +213,10 @@ def retro(limit: int = Query(50, ge=1, le=200),
         def _split(eff):
             point = ci_low = ci_high = None
             if isinstance(eff, dict):
-                for k in ("point", "effect", "did", "value"):
+                # ⚠️ **引擎写的是 `did_pp`**（2026-11-03 修）
+                #    `hub/retro/report.py:161` → {"did_pp":..., "ci_low":..., ...}
+                #    我第一版只找了 point/effect/did/value → **永远 None** ✅ ✗
+                for k in ("did_pp", "point", "effect", "did", "value"):
                     if isinstance(eff.get(k), (int, float)):
                         point = float(eff[k]); break
                 for k in ("ci_low", "low", "lower", "ci_lower"):
@@ -236,7 +249,7 @@ def retro(limit: int = Query(50, ge=1, le=200),
                 "metrics_before": r.metrics_before,
                 "metrics_after": r.metrics_after,
             })
-        return {"items": items}
+        return {"total": total, "limit": limit, "items": items}
 
 
 # ════════════════════════════════════════════════════ ⑱ 日志趋势

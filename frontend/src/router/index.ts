@@ -69,6 +69,12 @@ export const routes: RouteRecordRaw[] = [
         meta: { title: '通知中心', icon: 'Bell' },
       },
       {
+        path: 'images',
+        name: 'Images',
+        component: () => import('@/views/images/index.vue'),
+        meta: { title: '图片复核', icon: 'PictureFilled' },
+      },
+      {
         path: 'knowledge',
         name: 'Knowledge',
         component: () => import('@/views/knowledge/index.vue'),

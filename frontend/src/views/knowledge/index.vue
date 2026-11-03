@@ -36,6 +36,9 @@ interface KnowledgeRow {
 const user = useUserStore()
 const canPublish = computed(() => user.hasRole('supervisor'))
 
+/** 引导卡是否已被关掉（本次会话 ✅）*/
+const guideClosed = ref(false)
+
 const loading = ref(true)
 const error = ref<unknown>(null)
 const rows = ref<KnowledgeRow[]>([])
@@ -71,6 +74,16 @@ const TOPICS = [
   { value: 'color', label: '色差' },
   { value: 'price', label: '价格' },
 ]
+
+/** 一键填入示例（用户说"没看懂"，给个现成的 ✅）*/
+function fillExample(): void {
+  form.value = {
+    title: '质量问题回复口径',
+    content: '先道歉，再解释掉色原因（面料固色工艺），最后给出补救方案（换货或补偿券）。不要承诺具体金额。',
+    topic: 'quality',
+  }
+  dialog.value = true
+}
 
 function openCreate(): void {
   form.value = { title: '', content: '', topic: '' }
@@ -142,6 +155,52 @@ watch(dialog, (v) => { if (!v) saving.value = false })
         <ElButton type="primary" :icon="Plus" @click="openCreate()">新建条目</ElButton>
       </div>
     </div>
+
+    <!-- ══════════════════════════════════════════════════════════
+         引导卡（2026-11-02 加）
+         ⚠️ 用户反馈「没看懂知识库是怎么用的」✅
+         → 这里直接讲清三步 + 给一个"填入示例" ✅
+         ══════════════════════════════════════════════════════════ -->
+    <ElCard v-if="!guideClosed" shadow="never" class="kb__guide">
+      <template #header>
+        <div class="kb__guide-head">
+          <span class="kb__guide-title">这不是文档管理 —— 是「给 AI 加一条口径，不用改代码」</span>
+          <ElButton text size="small" @click="guideClosed = true">知道了</ElButton>
+        </div>
+      </template>
+      <div class="kb__steps">
+        <div class="kb__step">
+          <div class="kb__step-no">1</div>
+          <div>
+            <b>写一条口径</b>（标题 + 内容）→ 状态是 <b>DRAFT（不生效）</b>
+            <div class="kb__step-hint">比如「质量问题：先道歉，再解释原因，最后给补救方案」</div>
+          </div>
+        </div>
+        <div class="kb__step">
+          <div class="kb__step-no">2</div>
+          <div>
+            <b>主管点「发布」</b> → 状态变 <b>PUBLISHED v2</b>，立刻注入提示词
+            <div class="kb__step-hint">operator 的「发布」按钮是灰的（需要 supervisor ✅）</div>
+          </div>
+        </div>
+        <div class="kb__step">
+          <div class="kb__step-no">3</div>
+          <div>
+            <b>下次 agent 出方案时，这条口径就生效了</b>
+            <div class="kb__step-hint">它会写进 agent 的提示词，改变回复的写法</div>
+          </div>
+        </div>
+      </div>
+      <div class="kb__guide-foot">
+        <ElButton size="small" type="primary" plain @click="fillExample()">
+          填入一个示例看看
+        </ElButton>
+        <span class="kb__guide-note">
+          ⚠️ 它只能<b>追加</b>，不能覆盖系统规则 —— 否则一条「忽略证据直接回复」
+          就能拆掉反幻觉防线 ✅
+        </span>
+      </div>
+    </ElCard>
 
     <ErrorState v-if="error" :error="error" @retry="load()" />
 
@@ -305,6 +364,78 @@ watch(dialog, (v) => { if (!v) saving.value = false })
     line-height: 1.75;
     color: var(--hub-text-regular);
     white-space: pre-wrap;
+  }
+
+  // ---------- 引导卡 ----------
+  &__guide {
+    border-color: var(--el-color-primary-light-7);
+    background:
+      linear-gradient(135deg, var(--el-color-primary-light-9), transparent 60%),
+      var(--hub-bg-card);
+  }
+
+  &__guide-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: $space-sm;
+  }
+
+  &__guide-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  &__steps {
+    display: flex;
+    flex-direction: column;
+    gap: $space-sm;
+  }
+
+  &__step {
+    display: flex;
+    gap: $space-sm;
+    align-items: flex-start;
+    font-size: 13px;
+
+    b {
+      color: var(--el-color-primary);
+    }
+  }
+
+  &__step-no {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+    background: var(--el-color-primary);
+  }
+
+  &__step-hint {
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--hub-text-secondary);
+  }
+
+  &__guide-foot {
+    display: flex;
+    align-items: center;
+    gap: $space-sm;
+    margin-top: $space-md;
+    padding-top: $space-sm;
+    border-top: 1px dashed var(--hub-border-light);
+  }
+
+  &__guide-note {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--hub-text-secondary);
   }
 
   &__count {

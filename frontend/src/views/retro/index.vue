@@ -10,16 +10,19 @@
 // ══════════════════════════════════════════════════════════════
 import { computed, onMounted, ref } from 'vue'
 import {
-  ElButton, ElCard, ElDescriptions, ElDescriptionsItem, ElMessage, ElTag,
+  ElButton, ElCard, ElDescriptions, ElDescriptionsItem, ElMessage,
 } from 'element-plus'
 import { Download, Refresh } from '@element-plus/icons-vue'
 
 import { getRetro, type RetroItem } from '@/api/data'
 import { downloadExport, rerunRetro } from '@/api/write'
 import EmptyState from '@/components/EmptyState.vue'
+import LabelTag from '@/components/LabelTag.vue'
+import { CONCLUSION, REASON, STATUS } from '@/config/labels'
 import ErrorState from '@/components/ErrorState.vue'
 import PageLoading from '@/components/PageLoading.vue'
 
+const guideClosed = ref(false)
 const loading = ref(true)
 const error = ref<unknown>(null)
 const items = ref<RetroItem[]>([])
@@ -29,7 +32,9 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    items.value = await getRetro()
+    const r = await getRetro(200)
+    items.value = r.items
+    total.value = r.total
   } catch (e) {
     error.value = e
   } finally {
@@ -62,6 +67,10 @@ async function doExport(): Promise<void> {
 }
 
 // ---------- 汇总 ----------
+// ⚠️ **用后端返回的 total**（2026-11-02 修）：`items` 只有 limit 条 ✅
+//    原来用 items.length → 531 个等窗口被显示成 50 ✅ ✗
+const total = ref(0)
+
 const counts = computed(() => {
   const c = { POSITIVE: 0, NEGATIVE: 0, INCONCLUSIVE: 0, pending: 0 }
   for (const it of items.value) {
@@ -81,12 +90,6 @@ const concluded = computed(() =>
  * 区间"跨不跨 0"——**这是页面最重要的一句话** ✅
  * ⚠️ 后端现在没给 ci_low/ci_high → 只要 effect 缺失就判"还不能下结论" ✅
  */
-function verdict(it: RetroItem): { text: string; type: 'success' | 'danger' | 'info' | 'warning' } {
-  if (it.conclusion === 'POSITIVE') return { text: '有效（区间不跨 0）', type: 'success' }
-  if (it.conclusion === 'NEGATIVE') return { text: '有害（区间不跨 0）', type: 'danger' }
-  if (it.conclusion === 'INCONCLUSIVE') return { text: '不能下结论（区间跨 0）', type: 'warning' }
-  return { text: '还没到观察窗口', type: 'info' }
-}
 
 /** effect 可能是数字、可能是 null、以后可能是对象（带 ci）→ 统一取值 ✅ */
 function effectNum(it: RetroItem): number | null {
@@ -120,7 +123,37 @@ function fmtPct(v: number | null): string {
       </div>
     </div>
 
-    <PageLoading v-if="loading && !items.length" :rows="3" />
+        <!-- ══════════════════════════════════════════════════════════
+         为什么大部分动作"还没有结论"（2026-11-03 加，C ✅）
+         ══════════════════════════════════════════════════════════ -->
+    <ElCard v-if="!guideClosed" shadow="never" class="retro__guide">
+      <template #header>
+        <div class="retro__guide-head">
+          <span class="retro__guide-title">为什么大部分动作"还没有结论"</span>
+          <ElButton text size="small" @click="guideClosed = true">知道了</ElButton>
+        </div>
+      </template>
+      <div class="retro__guide-body">
+        <p>
+          每个动作做完后要等 <b>14 天观察窗口</b> 才判断有没有用 ——
+          效果不会当天显现，现在算是噪音。
+        </p>
+        <p>
+          窗口到了之后用 <b>DID（双重差分）</b> 算：
+          <code>效果 = 处理组前后变化 − 对照组前后变化</code>，再给一个 <b>95% 置信区间</b>。
+        </p>
+        <p>
+          <b>区间跨 0 → 不能下结论</b>（可能是巧合）。
+          所以我们宁可显示「等观察窗口」，也<b>不在窗口没到时宣布成功</b> ✅
+        </p>
+        <p class="retro__guide-muted">
+          当前：<b>{{ counts.POSITIVE + counts.NEGATIVE + counts.INCONCLUSIVE }}</b> 条已有结论 ·
+          <b>{{ total || counts.pending }}</b> 条还在等窗口
+        </p>
+      </div>
+    </ElCard>
+
+<PageLoading v-if="loading && !items.length" :rows="3" />
     <ErrorState v-else-if="error" :error="error" @retry="load()" />
 
     <template v-else>
@@ -140,7 +173,7 @@ function fmtPct(v: number | null): string {
         </div>
         <div class="retro__kpi">
           <div class="retro__kpi-label">等观察窗口</div>
-          <div class="retro__kpi-value">{{ counts.pending }}</div>
+          <div class="retro__kpi-value">{{ total || counts.pending }}</div>
         </div>
       </div>
 
@@ -170,9 +203,7 @@ function fmtPct(v: number | null): string {
           <div v-for="it in concluded" :key="it.proposal_id" class="retro__bar-row">
             <div class="retro__bar-label">
               <code>{{ it.proposal_id.slice(0, 8) }}</code>
-              <ElTag :type="verdict(it).type" size="small" effect="plain">
-                {{ verdict(it).text }}
-              </ElTag>
+              <LabelTag :dict="CONCLUSION" :value="it.conclusion" fallback="等观察窗口" />
             </div>
             <div class="retro__bar-track">
               <!-- 0 线 -->
@@ -205,13 +236,15 @@ function fmtPct(v: number | null): string {
             <code>{{ it.proposal_id.slice(0, 8) }}</code>
           </ElDescriptionsItem>
           <ElDescriptionsItem label="结论">
-            <ElTag :type="verdict(it).type" size="small">{{ verdict(it).text }}</ElTag>
+            <LabelTag :dict="CONCLUSION" :value="it.conclusion" fallback="等观察窗口" />
           </ElDescriptionsItem>
           <ElDescriptionsItem label="效果量">{{ fmtPct(effectNum(it)) }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="状态">{{ it.status }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="状态">
+            <LabelTag :dict="STATUS" :value="it.status" />
+          </ElDescriptionsItem>
           <ElDescriptionsItem label="观察期止">{{ it.observe_end ?? '—' }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="reason">
-            {{ it.reason_code ?? '—' }}
+          <ElDescriptionsItem label="为什么是这个结论">
+            <LabelTag :dict="REASON" :value="it.reason_code" fallback="还没算" />
           </ElDescriptionsItem>
         </ElDescriptions>
       </ElCard>
@@ -253,6 +286,48 @@ function fmtPct(v: number | null): string {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: $space-md;
+  }
+
+  &__guide {
+    border-color: var(--el-color-primary-light-7);
+  }
+
+  &__guide-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  &__guide-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  &__guide-body {
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--hub-text-secondary);
+
+    p {
+      margin: 0 0 6px;
+    }
+
+    b {
+      color: var(--hub-text-primary);
+    }
+
+    code {
+      padding: 0 4px;
+      border-radius: 3px;
+      background: var(--hub-bg-hover, #f5f7fa);
+      font-size: 11px;
+    }
+  }
+
+  &__guide-muted {
+    margin-top: $space-sm !important;
+    padding-top: $space-sm;
+    border-top: 1px dashed var(--hub-border-light);
   }
 
   &__kpi {

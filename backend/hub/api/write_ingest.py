@@ -40,6 +40,8 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+# 异步模式要返回 **202 + 自定义 body**（装饰器上写死 201 的那个不能用它 ✅）
+from fastapi.responses import JSONResponse
 
 from hub.api.deps import AuthUser, _trace_id, get_current_user
 
@@ -56,6 +58,38 @@ CHUNK = 1024 * 1024
 
 ALLOWED_PLATFORM = ("taobao", "jd")
 ALLOWED_TYPE = ("review", "product", "sales")
+
+
+def _humanize_warnings(warnings: list[str] | None) -> list[dict]:
+    """把后端 warnings 变成前端能直接用的形状（2026-11-03 加）。
+
+    **为什么需要**（用户实测："提示信息多采用后端值，没有口语化" ✅）
+        ① 后端句子带 Markdown 的 `**`，Vue 模板不认 → **星号原样显示** ✅ ✗
+        ② 前端分不清"这是错误还是提醒" ✅
+    → 这层做两件事：去掉 `**`，并按关键词给 `code` + `hint`（下一步做什么 ✅）
+    """
+    out: list[dict] = []
+    for raw in warnings or []:
+        msg = str(raw).replace("**", "")
+        code, hint = "warn", ""
+        low = msg.lower()
+        if "一行都没成功" in msg or "全坏" in msg:
+            code = "ALL_BAD"
+            hint = "检查「平台」和「类型」选对没有 —— 京东的文件别选淘宝"
+        elif "platform" in low and "错" in msg:
+            code = "PLATFORM_MISMATCH"
+            hint = "同一个文件换个平台再传一次（重复的行会被跳过）"
+        elif "已导过" in msg or "重复" in msg:
+            code = "DUPLICATE"
+            hint = "这个文件导过了，不会重复入库（按 platform_id upsert）"
+        elif "表头" in msg or "缺列" in msg:
+            code = "BAD_HEADER"
+            hint = "先看「数据接入」页上方的标准表头，改好再传"
+        elif "空" in msg:
+            code = "EMPTY"
+            hint = "文件里没有数据行，检查是不是只导了表头"
+        out.append({"code": code, "message": msg, "hint": hint})
+    return out
 
 
 @router.post("/ingest", status_code=status.HTTP_201_CREATED)
@@ -165,7 +199,11 @@ async def ingest(
             "rows_bad": report.row_bad,
             "pii_dropped": getattr(report, "pii_stats", {}) or {},
             "unmapped_rate": getattr(report, "unmapped_rate", None),
-            "warnings": warnings[:10],
+            # ⚠️ **2026-11-03 改**：warnings 不再原样倒给前端 ✅
+            #    · 去掉 `**`（Markdown 粗体在 Vue 模板里会**原样显示星号** ✅ ✗）
+            #    · 每条拆成 `{code, message, hint}`（前端能上色 + 给"下一步做什么" ✅）
+            "warnings": _humanize_warnings(warnings[:10]),
+            "warnings_text": [w.replace("**", "") for w in warnings[:10]],
             "message": ("该文件已导入过（同一个 SHA256），本次没重复写 ✅"
                         if existed else
                         (f"已入库 {len(records)} 条 ✅" if report.row_ok
@@ -187,6 +225,69 @@ async def ingest(
 #   ③ 耗时差一个量级：xlsx 3~8 秒；**图片包 50 张要 50 次 Vision**（几分钟 ✅）
 #   ④ 合规红线：**图片只在本地沙箱处理，永不出网** ✅
 #      `multimodal/vision.py` 硬编码只连本地，`cloud_guard` 对图片直接抛异常 ✅
+@router.post("/ingest/images/precheck")
+async def precheck_images(
+    request: Request,
+    file: UploadFile = File(..., description="图片包 zip"),
+    allow_loose: bool = Form(False, description="是否允许宽松匹配（后 5 位），默认关"),
+    user: AuthUser = Depends(get_current_user),
+):
+    """上传图片包 -> 只对账 -> 秒回结果（不写库、不解压、不调模型）。
+
+    真实包 428 张 x 8.9 秒 约 63 分钟；先跑再告诉用户只匹配上 1 条 = 白烧一小时。
+    所以先预检，用户看清对账再决定跑不跑。
+
+    返回里的 `verdict` 是一句人话结论，前端直接显示。
+    """
+    tid = _trace_id(request)
+    name = (file.filename or "images.zip").strip()
+    if not name.lower().endswith(".zip"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            {"code": "BAD_FILE_TYPE",
+                             "message": "图片包只接受 .zip",
+                             "trace_id": tid})
+
+    tmpdir = tempfile.mkdtemp(prefix="hub_pre_")
+    tmp = Path(tmpdir) / name
+    total = 0
+    try:
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_ZIP_BYTES:
+                    raise HTTPException(
+                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        {"code": "FILE_TOO_LARGE",
+                         "message": f"图片包超过 {MAX_ZIP_BYTES // 1024 // 1024}MB",
+                         "trace_id": tid})
+                f.write(chunk)
+        if total == 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                {"code": "EMPTY_FILE", "message": "压缩包是空的",
+                                 "trace_id": tid})
+
+        from hub.multimodal.engine import precheck_multimodal
+        try:
+            st = precheck_multimodal(str(tmp), allow_loose=allow_loose)
+        except Exception as e:                  # noqa: BLE001
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                {"code": "PRECHECK_FAILED",
+                                 "message": f"{type(e).__name__}: {e}",
+                                 "trace_id": tid}) from None
+
+        out = st.as_dict()
+        out["file"] = name
+        out["bytes"] = total
+        out["allow_loose"] = allow_loose
+        out["trace_id"] = tid
+        return out
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
 @router.post("/ingest/images", status_code=status.HTTP_201_CREATED)
 async def ingest_images(
     request: Request,
@@ -194,6 +295,7 @@ async def ingest_images(
     vision: str = Form("real", description="real=本地视觉模型 / mock=假标签（只用于测试）"),
     force: bool = Form(False, description="重跑已处理过的评价"),
     limit: int | None = Form(None, description="只处理前 N 条（调试用）"),
+    mode: str = Form("sync", description="sync=同步跑（小包/测试）/ queue=入队异步跑（**大包必须用这个** ✅）"),
     user: AuthUser = Depends(get_current_user),
 ):
     """**上传图片包 zip → M2 多模态处理 → 落 `review_feature`。**
@@ -218,6 +320,131 @@ async def ingest_images(
                             {"code": "BAD_FILE_TYPE",
                              "message": "图片包只接受 .zip（把图片打包成 zip 再传 ✅）",
                              "trace_id": tid})
+
+    if mode not in ("sync", "queue"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            {"code": "BAD_MODE", "message": "mode 只能是 sync / queue",
+                             "trace_id": tid})
+
+    # ══════════════════════════════════════════════════════════════
+    #  **异步模式（2026-11-03 加）** —— 修"大包必超时"
+    # ══════════════════════════════════════════════════════════════
+    # **为什么必须加**
+    #   同步模式下：428 张 × 8.9 秒 = **63 分钟**，HTTP 请求**必超时** ✅ ✗
+    #   而实测 3 张图只要 0.3 秒 → 同步看起来"没问题"，**是个假象** ✅
+    # 异步模式：
+    #   ① 把 zip **存到稳定路径**（worker 稍后要读，不能用临时目录 ✅）
+    #   ② 算整包 sha256 → `kind="mm:<前8位>"`（**同一个包重复传 = 同 kind = 409** ✅ 幂等）
+    #   ③ 入队 → **立刻返回 202 + run_id** ✅
+    #   ④ 前端轮询 `GET /api/runs/{run_id}`，`DONE` 后 `params.mm` 里就是统计 ✅
+    if mode == "queue":
+        import hashlib
+
+        # 存到项目根的 `data/uploads/`（worker 稍后要读，不能用临时目录 ✅）
+        updir = Path(__file__).resolve().parents[3] / "data" / "uploads"
+        updir.mkdir(parents=True, exist_ok=True)
+        dst = updir / f"{int(__import__('time').time())}_{name}"
+        total_q = 0
+        h = hashlib.sha256()
+        with open(dst, "wb") as f:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                total_q += len(chunk)
+                if total_q > MAX_ZIP_BYTES:
+                    dst.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        {"code": "FILE_TOO_LARGE",
+                         "message": f"图片包超过 {MAX_ZIP_BYTES // 1024 // 1024}MB，请分批 ✅",
+                         "trace_id": tid})
+                h.update(chunk)
+                f.write(chunk)
+        if total_q == 0:
+            dst.unlink(missing_ok=True)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                {"code": "EMPTY_FILE", "message": "压缩包是空的",
+                                 "trace_id": tid})
+
+        sha = h.hexdigest()
+        kind = f"mm:{sha[:8]}"
+
+        # ══════════════════════════════════════════════════════════
+        #  **已处理过的包 → 直接 409（不重跑 63 分钟 ✅）**
+        # ══════════════════════════════════════════════════════════
+        # ⚠️ 为什么需要这一段（2026-11-03 实测发现）
+        #   `uq_pipeline_run_active` 是 UNIQUE(kind) **只在活跃时**生效 ✅
+        #   → 第一条 DONE 之后，**再传同一个包能建新 run** → **重跑一遍** ✅ ✗
+        #   → 428 张图 = 白等 63 分钟 ✅
+        # 语义：
+        #   `force=False`（默认）→ 处理过就 409 + 已有 run_id ✅
+        #   `force=True`        → 允许重跑（用户明确要求 ✅）
+        if not force:
+            from sqlalchemy import select as _sel0
+
+            from hub.persistence.db import get_session as _gs0
+            from hub.persistence.models import PipelineRun as _PR0
+            with _gs0() as _s0:
+                prev = _s0.scalars(
+                    _sel0(_PR0).where(_PR0.kind == kind)
+                    .order_by(_PR0.created_at.desc()).limit(1)).first()
+                if prev is not None and prev.status in (
+                        "DONE", "DEGRADED", "QUEUED", "RUNNING"):
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        {"code": "ALREADY_PROCESSED",
+                         "message": (f"这个图片包（sha={sha[:8]}）已经处理过了 ✅ "
+                                     f"想强制重跑就勾上「重跑已处理的」"),
+                         "run_id": str(prev.id),
+                         "status": prev.status,
+                         "trace_id": tid})
+
+        from hub.queue.commands import enqueue
+        code = enqueue(kind=kind, params={
+            "images": str(dst), "vision": vision, "force": force,
+            "allow_loose": False, "limit": limit,
+        })
+        if code == 1:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                {"code": "ALREADY_RUNNING",
+                                 "message": f"这个图片包（sha={sha[:8]}）已经在排队/处理中 ✅",
+                                 "trace_id": tid})
+        if code != 0:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                {"code": "QUEUE_UNAVAILABLE",
+                                 "message": "Redis 连不上；任务已写库，等 worker 对账会捡起来",
+                                 "trace_id": tid})
+
+        # 回查刚建的那条（**不能加 status=='QUEUED'** —— worker 可能已经抢走了 ✅）
+        from sqlalchemy import select as _sel
+
+        from hub.persistence.db import get_session as _gs
+        from hub.persistence.models import PipelineRun as _PR
+        with _gs() as _s:
+            row = _s.scalars(_sel(_PR).where(_PR.kind == kind)
+                             .order_by(_PR.created_at.desc()).limit(1)).first()
+            rid = str(row.id) if row else None
+
+        # **清理旧包**（真包 471MB 一个，不清理会堆满磁盘 ✅）
+        try:
+            olds = sorted(updir.glob("*.zip"), key=lambda f: f.stat().st_mtime,
+                          reverse=True)
+            for f in olds[3:]:                 # 只留最近 3 个 ✅
+                f.unlink(missing_ok=True)
+        except Exception as e:                 # noqa: BLE001
+            print(f"  [清理] 旧图片包清理失败：{e}")
+
+        from hub.audit import write as audit_write
+        audit_write(actor=user.email, action="data.ingest_images",
+                    resource=f"run:{rid}",
+                    detail={"file": name, "bytes": total_q, "sha256": sha,
+                            "mode": "queue", "vision": vision, "trace_id": tid})
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
+            "run_id": rid, "kind": kind, "file": name, "bytes": total_q,
+            "sha256": sha, "status": "QUEUED", "mode": "queue",
+            "message": "已入队；用 GET /api/runs/{run_id} 轮询，DONE 后 params.mm 是统计",
+            "trace_id": tid})
 
     # ---------- 流式写临时文件（200MB 不能一次读进内存 ✅）----------
     tmpdir = tempfile.mkdtemp(prefix="hub_img_")

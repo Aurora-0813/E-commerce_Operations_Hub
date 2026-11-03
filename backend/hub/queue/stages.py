@@ -91,8 +91,33 @@ def _stage_dqe(params: dict) -> None:
 
 
 def _stage_mm(params: dict) -> None:
+    """多模态（M2）：**图片包由入队方指定**（2026-11-03 修）。
+
+    **为什么改**（这是 `_stage_ingest` 修过之后**漏掉的同一类债** ✅）
+        原来写死 `cmd_mm(str(IMAGE_PACKAGE), ...)` ✅
+        → 不管用户在 API 上传了哪个 zip，**链永远处理 data/mock/images** ✅ ✗
+        → 和 ingest 阶段一样的坑：用户以为"我上传的包被处理了" ✅
+
+    **参数**
+        params["images"]      图片包路径（目录或 zip）；不给就回退 mock 并明说 ✅
+        params["vision"]      `ollama`（本地真模型）/ `mock`（假标签）
+        params["allow_loose"] 是否允许宽松匹配（默认 False ✅）
+    """
     from hub.cli import cmd_mm
-    cmd_mm(str(IMAGE_PACKAGE), force=True, vision="ollama")
+
+    pkg = params.get("images")
+    if not pkg:
+        pkg = str(IMAGE_PACKAGE)
+        print("    ⚠️ 入队时没有指定 images → **回退到 data/mock/images**"
+              "（仅本地演示 ✅）")
+        print("      生产上应该用 `POST /api/ingest/images` 传包，"
+              "或在 enqueue 时传 images ✅")
+    vision = params.get("vision") or "ollama"
+    allow_loose = bool(params.get("allow_loose"))
+    if allow_loose:
+        print("    ⚠️ allow_loose=True：启用了「后 5 位后缀」宽松匹配"
+              "（TB00223 和 JD00223 会互相误伤 ✅）")
+    cmd_mm(str(pkg), force=True, vision=vision, allow_loose=allow_loose)
 
 
 def _stage_topic(params: dict) -> None:

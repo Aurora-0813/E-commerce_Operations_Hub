@@ -204,6 +204,19 @@ function goto(item: TodayItem): void {
       </ElCard>
 
       <!-- ============ ② KPI 四卡 ============ -->
+      <!-- 来源指标（2026-11-03 加）：后端返回结构化 sections（人话+数字），直接渲染 ✅ -->
+      <div v-if="brief?.sections?.length" class="dash__sections">
+        <div v-for="sec in brief.sections" :key="sec.title" class="dash__section">
+          <div class="dash__section-title">{{ sec.title }}</div>
+          <dl class="dash__section-list">
+            <template v-for="it in sec.items" :key="it.label">
+              <dt>{{ it.label }}</dt>
+              <dd>{{ it.value }}</dd>
+            </template>
+          </dl>
+        </div>
+      </div>
+      
       <div class="dash__kpis">
         <div v-for="k in kpi" :key="k.label" class="dash__kpi">
           <div class="dash__kpi-label">{{ k.label }}</div>
@@ -371,6 +384,50 @@ function goto(item: TodayItem): void {
   }
 
   // ---------- KPI ----------
+  &__sections {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: $space-md;
+
+    @media (max-width: 1200px) {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  &__section {
+    padding: $space-md;
+    border-radius: $radius-base;
+    border: 1px solid var(--hub-border-light);
+    background: var(--hub-bg-card);
+  }
+
+  &__section-title {
+    margin-bottom: $space-sm;
+    padding-bottom: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    border-bottom: 1px dashed var(--hub-border-light);
+  }
+
+  &__section-list {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px $space-sm;
+    margin: 0;
+    font-size: 12px;
+
+    dt {
+      color: var(--hub-text-secondary);
+      white-space: nowrap;
+    }
+
+    dd {
+      margin: 0;
+      font-weight: 500;
+      word-break: break-word;
+    }
+  }
+
   &__kpis {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));

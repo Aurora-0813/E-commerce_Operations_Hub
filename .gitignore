@@ -43,3 +43,7 @@ data/_tmp_*.zip
 # E2E 截图（跑一次就产生一批，是产物不是源码 ✅）
 frontend/e2e/shots/
 frontend/e2e/shots_full/
+
+# 上传图片压缩包
+data/uploads
+

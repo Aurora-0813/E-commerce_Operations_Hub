@@ -96,10 +96,25 @@ def main() -> int:
     # ---------- [5] retro ----------
     print("\n[5] /retro 的 effect 合法")
     r = c.get("/api/retro", headers=H)
-    ok_effect = all(x["effect"] in (None, "POSITIVE", "NEGATIVE", "INCONCLUSIVE",
-                                    "UNKNOWN")
-                    for x in r.json()["items"])
-    check("effect 都是合法值", ok_effect, f"{len(r.json()['items'])} 条")
+    # ⚠️ **2026-11-03 修：`effect` 是 DID 的 dict，不是字符串** ✅
+    #    以前它**永远是 None**（窗口没到）→ 这条断言一直"通过" ✅ ✗
+    #    现在有 68 条算出真区间 → 形状是
+    #      {"did_pp": -5.5, "ci_low": -9.2, "ci_high": -1.87, "n_treated": 10, ...}
+    #    所以断言改成：**None 或 dict 都算合法**，且 dict 里三键齐全 ✅
+    def _effect_ok(e) -> bool:
+        if e is None:
+            return True
+        if not isinstance(e, dict):
+            return False
+        return all(k in e for k in ("did_pp", "ci_low", "ci_high"))
+
+    items = r.json()["items"]
+    check("effect 都是合法值（None 或 DID dict）",
+          all(_effect_ok(x["effect"]) for x in items), f"{len(items)} 条")
+    # 顺带验我新加的 3 个拆出来的字段 ✅
+    check("每条都有 effect_point / ci_low / ci_high / crosses_zero",
+          all(set(("effect_point", "ci_low", "ci_high", "crosses_zero")) <= set(x)
+              for x in items), f"{len(items)} 条")
 
     # ---------- [6] handle 错误 id ----------
     print("\n[6] /handle 坏 id → 400；不存在 → 404")

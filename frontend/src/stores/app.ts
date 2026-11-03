@@ -23,8 +23,11 @@ export const useAppStore = defineStore('app', () => {
   /** 暗色主题 */
   const dark = ref<boolean>(readBool(KEY_DARK))
   /** 时间范围（顶部那三个按钮 + 自定义）*/
+  // ⚠️ **默认改成近 30 天**（2026-11-02 修）
+  //    原因：演示数据截止 2026-10-21，而「近 7 天」= 10-26~11-02 → **一条都没有** ✅ ✗
+  //    30 天能覆盖到数据，用户打开就能看到图 ✅
   const range = ref<RangeKey>(
-    (localStorage.getItem(KEY_RANGE) as RangeKey | null) ?? '7d',
+    (localStorage.getItem(KEY_RANGE) as RangeKey | null) ?? '30d',
   )
   /** 自定义范围（range === 'custom' 时有效）*/
   const customRange = ref<[string, string] | null>(null)

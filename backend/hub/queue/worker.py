@@ -89,6 +89,72 @@ def _release_gpu(r: redis.Redis) -> None:
 
 # ==================== 跑一条链 ====================
 
+def _process_mm(run_id: str, row, r: redis.Redis) -> str:
+    """跑一条 `kind="mm:..."` 的图片包任务（2026-11-03 加）。
+
+    **为什么要有它**
+        `POST /api/ingest/images` 原来是**同步**的 ✅
+        实测 3 张图 0.3 秒没问题，但真实包 **428 张 x 8.9 秒 = 63 分钟** ✅
+        → HTTP 必超时 ✅ ✗
+        现在：上传只存文件 + 入队（202 ✅），处理在 worker 里跑（跑多久都行 ✅）
+
+    **结果写回 `pipeline_run.params`**
+        `{"mm": {images, processed, skipped, deduped, assets, stripped,
+                 destroyed, residual, elapsed_s, trace_id}}`
+        → 前端轮询 `GET /api/runs/{run_id}` 就能拿到 ✅
+        → `residual` 必须为 0（沙箱零残留 = 隐私红线 ✅）
+    """
+    from hub.cli import cmd_mm
+
+    params = dict(row.params or {})
+    pkg = params.get("images")
+    if not pkg:
+        _update(run_id, status="DEAD", error="kind=mm 但 params 里没有 images")
+        return "SKIPPED"
+
+    _update(run_id, status="RUNNING", started_at=row.started_at or now(),
+            heartbeat_at=now(), attempt=(row.attempt or 0) + 1, error=None)
+    try:
+        # **直接调 engine**（不走 cmd_mm —— CLI 只 print，拿不到统计 ✅）
+        from hub.multimodal.engine import run_multimodal
+        from hub.multimodal.vision import get_vision
+
+        v = get_vision(params.get("vision") or "ollama")
+        st = run_multimodal(
+            pkg,
+            force=bool(params.get("force", True)),
+            vision=v,
+            limit=params.get("limit"),
+            allow_loose=bool(params.get("allow_loose")),
+        )
+        summary = {
+            "images": st.images,
+            "processed": st.processed,
+            "skipped": st.skipped,
+            "matched": st.matched,
+            "unmatched": st.unmatched,
+            "deduped": st.deduped,
+            "assets": st.assets,
+            "stripped": st.stripped,
+            "destroyed": st.destroyed,
+            # **隐私红线**：不是 0 就是 bug ✅
+            "residual": st.residual,
+            "failed": st.failed,
+            "by_tier": st.by_tier,
+            "elapsed_s": st.elapsed_s,
+            "trace_id": st.trace_id,
+            "vision": v.name,
+        }
+        _update(run_id, status="DONE", finished_at=now(), heartbeat_at=now(),
+                params={**params, "mm": summary},
+                degraded=bool(st.failed or st.residual))
+        return "DONE"
+    except Exception as e:                      # noqa: BLE001
+        _update(run_id, status="FAILED", finished_at=now(), heartbeat_at=now(),
+                error=f"{type(e).__name__}: {e}")
+        return "FAILED"
+
+
 def _process_handle(run_id: str, row, r: redis.Redis) -> str:
     """跑一条 `kind="handle"` 的 agent 任务。
 
@@ -160,6 +226,20 @@ def process(run_id: str, r: redis.Redis) -> str:
     #     · **不用改表/迁移**（索引是 UNIQUE(kind)，簇 id 自然区分了 ✅）
     if str(getattr(row, "kind", "") or "").startswith("handle"):
         return _process_handle(run_id, row, r)
+
+    # ==================== kind="mm" —— 图片包异步处理 ====================
+    # ⚠️ **2026-11-03 加**（修真正的"会用不了"）
+    #   原问题：`POST /api/ingest/images` **同步阻塞** ✅
+    #     → 实测 3 张图 0.3 秒，所以看起来没问题 ✅
+    #     → 但真实包 **428 张 × 8.9 秒 ≈ 63 分钟** → **HTTP 必超时** ✅ ✗
+    #   现在：上传只负责"存文件 + 入队"，返回 **202 + run_id** ✅
+    #        真正处理在 worker 里跑（跑多久都不影响 HTTP ✅）
+    #   前端轮询 `GET /api/runs/{run_id}` 直到 DONE ✅
+    #
+    # 为什么 kind 编上哈希：`pipeline_run` 有 UNIQUE(kind)（同 kind 只能一条活跃）
+    #   → 不同图片包**应该能并行** ✅ → `mm:<zip sha 前 8 位>` ✅
+    if str(getattr(row, "kind", "") or "").startswith("mm"):
+        return _process_mm(run_id, row, r)
 
     # 标记开始（对账器靠 heartbeat 判断"是不是卡死了"）
     _update(run_id, status="RUNNING", started_at=row.started_at or now(),

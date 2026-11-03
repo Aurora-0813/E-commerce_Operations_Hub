@@ -80,52 +80,43 @@ def get_brief(user: AuthUser = Depends(get_current_user)):
     #   `brief` 生成时用 `collect_inputs()` 拉了一批数字，**只有它知道每个数字的来源** ✅
     #   而 `latest()` 只返回文本 ✅ → 前端"来源指标"那块就空了 ✅ ✗
     #   → 这里**重新拉一次**（只读聚合，几十毫秒 ✅），把扁平的数字给前端 ✅
-    inputs: dict = {}
+    # ══════════════════════════════════════════════════════════════
+    #  **来源指标**：直接返回结构化 sections（2026-11-03 重写）
+    # ══════════════════════════════════════════════════════════════
+    # **上一版错在哪**
+    #   我写了个 `_flat()` 递归拍平嵌套 dict ✅
+    #   → 结果前端拿到的是 `status[0][1][0].n = 2` 这种**噪音** ✅ ✗
+    #   → 而 `collect_inputs()` 返回的**本来就是人话 + 数字**：
+    #       {"status": [["规模与影响", [["评价总数", "7020 条（保留 4115）"], …]], …]}
+    #   → 所以**根本不该拍平**，原样转成 `sections` 就行 ✅
+    #
+    # 返回形状（前端直接渲染成 3 张卡）：
+    #   sections: [{title: "规模与影响", items: [{label: "评价总数", value: "7020 条（保留 4115）"}]}]
+    sections: list[dict] = []
     try:
         from hub.brief import collect_inputs
-
-        # ⚠️ **不要把 `_flatten_numbers` 用在这里**（2026-11-01 踩过 ✅）
-        #    那个函数是**校验累加器**：签名 `(obj, acc: set[str], depth)`、
-        #    把数字**格式化成字符串**收进 set、**返回 None** ✅
-        #    → 它的用途是"这堆数字够不够校验日报"，**不是给人看的** ✅
-        #    → 我要的是 **"指标名 → 值"**，所以自己拍平嵌套 dict ✅
-        def _flat(obj, prefix: str = "", out: dict | None = None,
-                  depth: int = 0) -> dict:
-            out = {} if out is None else out
-            if depth > 4:
-                return out
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    _flat(v, f"{prefix}.{k}" if prefix else str(k), out, depth + 1)
-            elif isinstance(obj, (list, tuple)):
-                # ⚠️ **`[label, value]` 二元组要特殊处理**（2026-11-01 修）
-                #    `collect_inputs()` 里的 `items` 就是这种形状 ✅
-                #    → 拍平后应该直接是 **`{label: value}`**，而不是 `status[0][1][0]` ✅
-                if (len(obj) == 2 and isinstance(obj[0], str)
-                        and isinstance(obj[1], (int, float))
-                        and not isinstance(obj[1], bool)):
-                    out[obj[0]] = obj[1]
-                    return out
-                if prefix:
-                    out[f"{prefix}.n"] = len(obj)
-                for i, v in enumerate(obj[:3]):
-                    _flat(v, f"{prefix}[{i}]", out, depth + 1)
-            elif isinstance(obj, bool) or obj is None:
-                return out
-            elif isinstance(obj, (int, float)):
-                # ⚠️ **只收数字**（2026-11-01 修）
-                #    第一版连字符串也收 → 前端"来源指标"会显示一堆
-                #    `status[0][0] = 规模与影响` 这种噪音 ✅ ✗
-                #    "来源指标"要的是**能被统计的数字** ✅
-                out[prefix] = obj
-            return out
-
-        inputs = _flat(collect_inputs())
+        raw = collect_inputs()
+        for group, blocks in raw.items():
+            if group == "status":
+                # status 的形状是 [[组名, [[label, value], …]], …]
+                for block in blocks or []:
+                    if not (isinstance(block, (list, tuple)) and len(block) == 2):
+                        continue
+                    title, items = block
+                    pairs = [
+                        {"label": str(it[0]), "value": str(it[1])}
+                        for it in (items or [])
+                        if isinstance(it, (list, tuple)) and len(it) == 2
+                    ]
+                    if pairs:
+                        sections.append({"title": str(title), "items": pairs})
     except Exception as e:                        # noqa: BLE001
-        inputs = {"__error__": f"{type(e).__name__}: {e}"}
+        sections = [{"title": "取指标失败", "items": [
+            {"label": "原因", "value": f"{type(e).__name__}: {e}"}]}]
+
     return {"available": True, "generated_at": r["created_at"],
             "text": r["text"], "lines": (r["text"] or "").splitlines(),
-            "inputs": inputs,
+            "sections": sections,
             "counts": r["counts"], "fallback_table": r["fallback_table"]}
 
 
@@ -226,10 +217,41 @@ def get_proposal(proposal_id: str, request: Request,
         # 战绩算不出来**不该让详情 500** ✅ → 给 null 并说明 ✅
         out["experience"] = None
         out["experience_error"] = f"{type(e).__name__}: {e}"
+    # ══════════════════════════════════════════════════════════════
+    #  **告诉前端"这条提案有没有待批任务"**（2026-11-02 修）
+    # ══════════════════════════════════════════════════════════════
+    # 用户实测反馈：点「批准」→ 404「这个提案没有待批任务」✅
+    #   根因：UI 只看 `status == PENDING_APPROVAL` 就显示「批准」✅
+    #        但 `hitl_task` 可能**不存在**（比如测试夹具、或提交网关时失败 ✅）
+    #   → 这里直接给前端一个布尔，让它**禁用按钮 + 说明原因** ✅
+    try:
+        from sqlalchemy import select as _sel
+
+        from hub.persistence.models import HitlTask as _HT
+        with get_session() as _s:
+            from uuid import UUID as _U
+            _pid = _U(proposal_id)
+            out["has_pending_task"] = _s.scalar(
+                _sel(_HT.id).where(_HT.proposal_id == _pid,
+                                  _HT.status == "PENDING").limit(1)) is not None
+            # 说明"为什么不能批"（前端直接显示 ✅）
+            if not out["has_pending_task"]:
+                if out.get("status") == "PENDING_APPROVAL":
+                    out["approve_blocked_reason"] = (
+                        "这条提案状态是「待批准」，但网关里**没有对应的待办任务** —— "
+                        "可能是提交网关时失败了。请重新采纳一次（会重新提交）")
+                elif out.get("status") == "PROPOSED":
+                    out["approve_blocked_reason"] = (
+                        "这条提案**还没提交给网关**（状态是「待处理」），所以还不能批准。"
+                        "重新采纳一次就会自动提交 ✅")
+                else:
+                    out["approve_blocked_reason"] = (
+                        f"当前状态「{out.get('status')}」，不需要（也不能）再批准 ✅")
+    except Exception as e:                        # noqa: BLE001
+        # 算不出来**不该让详情 500** ✅
+        out["has_pending_task"] = None
+        out["approve_blocked_reason"] = f"无法判断（{type(e).__name__}）"
     return out
-
-
-# ════════════════════════════════════════════════════ 8. audit
 @router.get("/audit")
 def list_audit(
     limit: int = Query(50, ge=1, le=500),

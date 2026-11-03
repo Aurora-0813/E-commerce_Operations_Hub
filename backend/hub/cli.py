@@ -128,7 +128,8 @@ def cmd_dqe(force: bool = False, batch: str | None = None) -> None:
 
 
 def cmd_mm(package: str, force: bool = False, batch: str | None = None,
-           limit: int | None = None, vision: str = "mock") -> None:
+           limit: int | None = None, vision: str = "mock",
+           allow_loose: bool = False) -> None:
     """跑多模态处理：图片包 → 沙箱 → Vision → 覆写销毁 → review_feature。"""
     from uuid import UUID
 
@@ -138,7 +139,8 @@ def cmd_mm(package: str, force: bool = False, batch: str | None = None,
     batch_id = UUID(batch) if batch else None
     v = get_vision(vision)
     print(f"开始多模态处理（图片包：{package}｜Vision：{v.name}）……")
-    stats = run_multimodal(package, batch_id=batch_id, force=force, vision=v, limit=limit)
+    stats = run_multimodal(package, batch_id=batch_id, force=force, vision=v,
+                           limit=limit, allow_loose=allow_loose)
 
     print(f"\n评价：待处理 {stats.total} 条，成功 {stats.processed}，跳过 {stats.skipped}")
     print(f"图片：共 {stats.images} 张｜pHash 去重 {stats.deduped} 张｜"

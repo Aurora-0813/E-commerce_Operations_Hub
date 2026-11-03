@@ -216,8 +216,11 @@ def create_app() -> FastAPI:
     app.include_router(write_misc_router)
     # ---------- 写接口 · 数据上传（2026-11-01 补的真缺口）----------
     # 原来只能 `hub p0 <文件>` 命令行导入；42 条路由里**没有任何上传入口** ✅ ✗
+    from hub.api.images import router as images_router
     from hub.api.write_ingest import router as write_ingest_router
     app.include_router(write_ingest_router)
+    # ---------- 图片明细 + 人工复核（2026-11-03 加，新文件 ✅ 零冲突）----------
+    app.include_router(images_router)
 
     # ---------- OpenAPI 元数据（中文标题 / 分组说明 / 响应示例）----------
     # 2026-11-01：`/api/docs` 原来全是英文标题（函数名自动生成）、没有返回结构

@@ -8,8 +8,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  ElButton, ElCard, ElDescriptions, ElDescriptionsItem, ElDrawer,
-  ElIcon, ElTag,
+  ElButton, ElCard, ElCollapse, ElCollapseItem, ElDescriptions, ElDescriptionsItem,
+  ElDrawer, ElIcon, ElTag, ElTooltip,
 } from 'element-plus'
 import { ArrowLeft, Document, Warning } from '@element-plus/icons-vue'
 
@@ -18,6 +18,7 @@ import {
   type ClusterReview, type ProposalDetail, type WeekPoint,
 } from '@/api/data'
 import { ApiError } from '@/api/client'
+import { useUserStore } from '@/stores/user'
 import { approveProposal, rejectProposal } from '@/api/write'
 import ErrorState from '@/components/ErrorState.vue'
 import PageLoading from '@/components/PageLoading.vue'
@@ -25,12 +26,13 @@ import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent } from 'echarts/components'
+import { GridComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 
-use([CanvasRenderer, BarChart, GridComponent, TooltipComponent])
+use([CanvasRenderer, BarChart, GridComponent, TitleComponent, TooltipComponent])
 
 const route = useRoute()
 const router = useRouter()
+const user = useUserStore()
 
 const id = computed(() => String(route.params.id ?? ''))
 const loading = ref(true)
@@ -93,6 +95,9 @@ watch(id, () => void load())
 
 // ---------- 批准 / 拒绝 ----------
 const acting = ref(false)
+/** 能不能批准：**必须后端说有待办任务** + 角色够 ✅ */
+const canApprove = computed(() =>
+  detail.value?.has_pending_task === true && user.hasRole('supervisor'))
 const rejectDrawer = ref(false)
 const rejectReason = ref('')
 
@@ -155,6 +160,39 @@ function highlighted(content: string): string {
   return out
 }
 
+/** 合规检查命中（后端 args 里带 `compliance_flags` ✅）*/
+const complianceHits = computed<string[]>(() => {
+  const f = detail.value?.args?.compliance_flags
+  return Array.isArray(f) ? (f as string[]) : []
+})
+
+/**
+ * 人话字段：**只暴露业务能看懂的 key**（2026-11-02 加）
+ * 其他字段（比如内部的 `review_ids`）一律进"技术细节" ✅
+ */
+const FRIENDLY: Record<string, string> = {
+  spu_id: '商品 id',
+  platform: '平台',
+  cluster_id: '问题簇',
+  topic: '问题类型',
+  title: '商品',
+  content: '内容',
+  description: '描述',
+  price: '价格',
+  cluster: '问题簇',
+}
+const friendlyArgs = computed<Record<string, unknown>>(() => {
+  const a = detail.value?.args ?? {}
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(a)) {
+    if (k === 'compliance_flags') continue
+    const label = FRIENDLY[k]
+    if (label) out[label] = v
+    // 不认识的 key **不显示**（进技术细节 ✅）
+  }
+  return out
+})
+
 const trendOption = computed(() => ({
   tooltip: { trigger: 'axis' },
   grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
@@ -162,7 +200,8 @@ const trendOption = computed(() => ({
            axisLabel: { fontSize: 11, color: '#909399' } },
   yAxis: { type: 'value', axisLabel: { fontSize: 11, color: '#909399' },
            splitLine: { lineStyle: { color: '#ebeef5' } } },
-  series: [{ type: 'bar', data: trend.value.map((d) => d.n), barWidth: 16,
+  // ⚠️ **`d.reviews`**（不是 `d.n` ✅ 2026-11-02 修）
+  series: [{ type: 'bar', data: trend.value.map((d) => d.reviews), barWidth: 16,
              itemStyle: { borderRadius: [3, 3, 0, 0] } }],
 }))
 </script>
@@ -198,17 +237,69 @@ const trendOption = computed(() => ({
           <div class="detail__section-label">为什么做这个动作</div>
           <p class="detail__rationale">{{ detail.rationale }}</p>
 
-          <div class="detail__section-label">参数（**由代码构造，不是模型填的** ✅）</div>
-          <ElDescriptions :column="1" size="small" border>
-            <ElDescriptionsItem v-for="(v, k) in detail.args" :key="k" :label="String(k)">
-              <span class="detail__arg">{{ String(v) }}</span>
-            </ElDescriptionsItem>
-          </ElDescriptions>
+          <!-- ⚠️ **2026-11-02 改：不再逐字段 dump 后端 JSON** ✅ -->
+          <!--    用户反馈「太多后端 json 数据，看不懂」✅ -->
+          <!--    现在按**工具类型**渲染成人话：回复草稿就给"回复正文"，改价就给"新价格" ✅ -->
+          <div class="detail__section-label">要做什么（参数由代码构造，不是模型填的 ✅）</div>
+
+          <!-- ① 生成回复草稿：重点是那段回复正文 -->
+          <template v-if="detail.tool_name === 'review.draft_reply'">
+            <div class="detail__reply">
+              <div class="detail__reply-label">这条回复会发给买家：</div>
+              <div class="detail__reply-body">{{ String(detail.args.content ?? '（空）') }}</div>
+              <div v-if="complianceHits.length" class="detail__reply-flags">
+                ⚠️ 合规检查命中 {{ complianceHits.length }} 处：
+                <code v-for="(h, i) in complianceHits" :key="i">{{ h }}</code>
+              </div>
+              <div v-else class="detail__reply-ok">✅ 合规检查通过（无金额承诺 / 无隐私索要 / 无绝对化用语）</div>
+            </div>
+          </template>
+
+          <!-- ② 改描述：给"新描述" + 商品 -->
+          <template v-else-if="detail.tool_name === 'listing.update_desc'">
+            <div class="detail__reply">
+              <div class="detail__reply-label">新的商品描述：</div>
+              <div class="detail__reply-body">{{ String(detail.args.description ?? '（空）') }}</div>
+              <div class="detail__reply-label" style="margin-top: 8px">作用在商品：</div>
+              <div>{{ String(detail.args.platform ?? '') }} / {{ String(detail.args.spu_id ?? '') }}</div>
+            </div>
+          </template>
+
+          <!-- ③ 改价格：给"新价格" -->
+          <template v-else-if="detail.tool_name === 'product.update_price'">
+            <div class="detail__reply">
+              <div class="detail__reply-label">新价格：</div>
+              <div class="detail__reply-body detail__reply-body--big">
+                ¥ {{ String(detail.args.price ?? detail.args.new_price ?? '（空）') }}
+              </div>
+            </div>
+          </template>
+
+          <!-- ④ 其他工具：只显示"人话字段"，不 dump 全部 -->
+          <template v-else>
+            <ElDescriptions :column="1" size="small" border>
+              <ElDescriptionsItem v-for="(v, k) in friendlyArgs" :key="k" :label="String(k)">
+                <span class="detail__arg">{{ String(v) }}</span>
+              </ElDescriptionsItem>
+            </ElDescriptions>
+          </template>
+
+          <!-- 技术细节：默认折叠（trace/run/tool_version/原始 args ✅）-->
+          <el-collapse class="detail__tech">
+            <el-collapse-item title="技术细节（想看原始参数/链路 id 点这里）">
+              <ElDescriptions :column="1" size="small" border>
+                <ElDescriptionsItem label="工具版本">{{ detail.tool_version }}</ElDescriptionsItem>
+                <ElDescriptionsItem label="链路 id">{{ detail.trace_id }}</ElDescriptionsItem>
+                <ElDescriptionsItem label="运行 id">{{ detail.run_id }}</ElDescriptionsItem>
+                <ElDescriptionsItem label="原始参数">
+                  <pre class="detail__raw">{{ JSON.stringify(detail.args, null, 2) }}</pre>
+                </ElDescriptionsItem>
+              </ElDescriptions>
+            </el-collapse-item>
+          </el-collapse>
 
           <div class="detail__meta">
-            <span>工具版本 <code>{{ detail.tool_version }}</code></span>
-            <span>trace <code>{{ detail.trace_id }}</code></span>
-            <span>{{ new Date(detail.created_at).toLocaleString('zh-CN') }}</span>
+            <span>生成于 {{ new Date(detail.created_at).toLocaleString('zh-CN') }}</span>
           </div>
         </ElCard>
 
@@ -294,16 +385,30 @@ const trendOption = computed(() => ({
           <div v-else class="detail__exp-empty">还没有历史（第一次做这类动作）</div>
 
           <!-- 决定 -->
+          <!-- ⚠️ **2026-11-02 修**：用后端的 `has_pending_task` 判断能不能批 ✅ -->
+          <!--    原来只看 status === PENDING_APPROVAL → 点了 404 ✅ ✗ -->
           <div class="detail__actions">
-            <ElButton type="primary" :loading="acting" @click="doApprove()">
-              批准（会真执行）
-            </ElButton>
+            <ElTooltip
+              :disabled="canApprove"
+              :content="detail.approve_blocked_reason || '这条现在不能批准'"
+              placement="top"
+            >
+              <span>
+                <ElButton type="primary" :loading="acting" :disabled="!canApprove"
+                          @click="doApprove()">
+                  批准（会真执行）
+                </ElButton>
+              </span>
+            </ElTooltip>
             <ElButton :disabled="acting" @click="rejectDrawer = true">
               拒绝
             </ElButton>
           </div>
+          <div v-if="!canApprove && detail.approve_blocked_reason" class="detail__actions-hint is-warn">
+            ⚠️ {{ detail.approve_blocked_reason }}
+          </div>
           <div class="detail__actions-hint">
-            ⚠️ 批准需要 <b>supervisor</b> 角色；operator 点了会 403（UI 会先隐藏按钮 ✅）
+            批准需要 <b>supervisor</b> 角色；operator 点了会 403（UI 会先隐藏按钮 ✅）
           </div>
         </ElCard>
       </div>
@@ -314,7 +419,10 @@ const trendOption = computed(() => ({
           <span class="detail__title">该簇评价周趋势</span>
           <span class="detail__sub">用来判断"这个问题是在变好还是变坏"</span>
         </template>
-        <EmptyState v-if="!trend.length" compact description="还没有周趋势数据" />
+        <!-- ⚠️ 空态说清为什么空（2026-11-02 ✅）-->
+        <EmptyState v-if="!trend.length" compact
+                    description="这个簇还没有周趋势数据"
+                    hint="按周统计需要这个簇的评价跨越多周；如果都集中在同一周，就没有趋势可画" />
         <VChart v-else class="detail__trend" :option="trendOption" autoresize />
       </ElCard>
     </template>

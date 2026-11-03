@@ -202,6 +202,20 @@ export interface ImageIngestResult {
  * ⚠️ 语义和 `ingestFile` 不同：这是**给已有评价补打标**，不新增评价 ✅
  * ⚠️ 只接受 .zip，≤1GB（真实 images.zip 471MB ✅）
  */
+/**
+ * 上传图片包 → 处理 → 结果
+ *
+ * ⚠️ **2026-11-03 改：默认走「入队异步」**
+ *   同步模式下 428 张 x 8.9 秒 = **63 分钟**，HTTP 必超时 ✅ ✗
+ *   （实测 3 张图 0.3 秒，所以同步"看起来"没问题 —— 是个假象 ✅）
+ *
+ * 现在的流程：
+ *   ① 上传 → 后端存文件 + 入队 → **202 + run_id**（秒回 ✅）
+ *   ② 前端**轮询** `GET /api/runs/{run_id}` 直到 DONE/FAILED
+ *   ③ 把 `params.mm` 的统计转成 `ImageIngestResult` 返回（**组件不用改** ✅）
+ *
+ * 同包重复传：后端按整包 sha256 判重 → **409（带已有 run_id）** ✅ 幂等
+ */
 export async function ingestImages(
   file: File, vision: 'real' | 'mock' = 'real', force = true,
   onProgress?: (percent: number) => void,
@@ -210,12 +224,90 @@ export async function ingestImages(
   fd.append('file', file)
   fd.append('vision', vision)
   fd.append('force', force ? 'true' : 'false')
-  const { data } = await http.post<ImageIngestResult>('/api/ingest/images', fd, {
-    headers: { 'Content-Type': undefined as unknown as string },
-    timeout: 1_800_000, // 图片包 + 真模型可能几分钟 ✅
-    onUploadProgress: (e) => {
-      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
-    },
+  // ⚠️ **必须是 queue**（sync 只给小包/测试用 ✅）
+  fd.append('mode', 'queue')
+
+  onProgress?.(5)
+  const { data } = await http.post<{
+    run_id: string; kind: string; status: string; sha256: string
+  }>('/api/ingest/images', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180_000,
+  })
+  onProgress?.(20)
+
+  const rid = data.run_id
+  const deadline = Date.now() + 3 * 60 * 60 * 1000     // 3 小时（真包 63 分钟 ✅）
+  let pct = 20
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000))
+    const { data: run } = await http.get<{
+      status: string; error?: string | null
+      params?: { mm?: Record<string, unknown> }
+    }>(`/api/runs/${rid}`)
+
+    if (run.status === 'DONE' || run.status === 'FAILED' || run.status === 'DEAD') {
+      const mm = (run.params?.mm ?? {}) as Record<string, unknown>
+      onProgress?.(100)
+      return {
+        images: Number(mm.images ?? 0),
+        processed: Number(mm.processed ?? 0),
+        skipped: Number(mm.skipped ?? 0),
+        deduped: Number(mm.deduped ?? 0),
+        failed: Number(mm.failed ?? 0),
+        stripped: Number(mm.stripped ?? 0),
+        destroyed: Number(mm.destroyed ?? 0),
+        residual: Number(mm.residual ?? 0),
+        elapsed_s: Number(mm.elapsed_s ?? 0),
+        vision: String(mm.vision ?? vision),
+      } as ImageIngestResult
+    }
+    pct = Math.min(95, pct + 2)
+    onProgress?.(pct)
+  }
+  throw new Error('处理超时（3 小时）—— 去「运维台」看这条 run 的状态 ✅')
+}
+
+/**
+ * 图片包**预检**（只对账，不处理 ✅）
+ *
+ * **为什么必须先预检**
+ *   真实包 428 张 x 8.9 秒 ≈ **63 分钟**；如果先跑再发现"只匹配上 1 条"，
+ *   用户就白等了一小时。
+ *   → 这个接口**不解压、不调模型、秒回**，先让用户看清对账再决定跑不跑。
+ */
+export interface PrecheckResp {
+  package_files: number
+  manifest_source: string
+  manifest_rows: number
+  name_collisions: number
+  reviews_with_image: number
+  reviews_matched: number
+  reviews_unmatched: number
+  images_matched: number
+  images_unused: number
+  by_tier: Record<string, number>
+  tier_text: string
+  unmatched_sample: Array<{ review_id: string; expected_files: string[] }>
+  unused_sample: string[]
+  missing_sample: Array<{ review_id: string; expected: number; found: number }>
+  est_calls: number
+  est_seconds: number
+  verdict: string
+  file: string
+  bytes: number
+}
+
+export async function precheckImages(
+  file: File,
+  allowLoose = false,
+): Promise<PrecheckResp> {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('allow_loose', String(allowLoose))
+  const { data } = await http.post<PrecheckResp>('/api/ingest/images/precheck', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60_000,
   })
   return data
 }

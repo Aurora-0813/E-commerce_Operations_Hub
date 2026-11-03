@@ -95,7 +95,8 @@ GROUPS: dict[str, list[str]] = {
         "check_fusion",          # 规则+模型融合
         "check_engine",          # DQE 引擎端到端
         "check_accuracy",        # 分类准确率（要 LLM）
-        "check_multimodal",      # 图片打标（要视觉模型）
+        "check_multimodal",
+        "check_imagematch",      # 图片打标（要视觉模型）
         "check_grounding",       # 证据子串校验（要 LLM）
         "check_align",           # 跨平台同款对齐
         "check_classify",        # 差评分类

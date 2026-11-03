@@ -213,6 +213,30 @@ def handle(cluster_id: str, *, actor_role: str = "operator",
         "query_product": _query_product,
         "query_outcome": _query_outcome,
     }
+    # ══════════════════════════════════════════════════════════════
+    #  **给读工具补 span**（2026-11-03 修 #8）
+    # ══════════════════════════════════════════════════════════════
+    # **问题**：`handle.py` 顶部**直接 import 了 `_query_cluster` 等裸函数** ✅
+    #   → 调用**不经过 `gateway.invoke()`** ✅
+    #   → 所以 `invoke()` 里埋的 `tool.*` span **对 agent 完全不生效** ✅ ✗
+    #   → 实测：`/trace` 里只有 `llm.chat`，工具调用**没有任何记录** ✅
+    #
+    # **为什么选"这里包装"而不是"改走网关"**
+    #   改走网关要先解决"读工具没有 `evidence_refs`"和依据校验的冲突 ✅
+    #   那是个**语义决策**（读工具该不该要依据），不该顺手改 ✅
+    #   而这里包装**零风险**：只加观测，不改任何行为 ✅
+    #
+    # **以后要做"读工具也过网关"（有审计 + 幂等 + 频控）** 时，
+    #   把这里换成 `gateway.invoke(spec, args, ctx)` 就行 ✅
+    from hub.core.tracing import span as _span
+
+    def _traced(tool_name: str, fn):
+        def _wrapped(*args, **kwargs):
+            with _span(f"tool.{tool_name}", kind="tool"):
+                return fn(*args, **kwargs)
+        return _wrapped
+
+    handlers = {k: _traced(k, v) for k, v in handlers.items()}
 
     # ---------------- ①②③ 三步：参数全部由代码给 ----------------
     try:

@@ -67,6 +67,12 @@ export interface BriefResp {
   text?: string
   /** ✅ **真实字段就是这个**（不是 bullets）—— 按行拆好的数组 */
   lines?: string[]
+  /**
+   * **来源指标**（2026-11-03 加）
+   * 3 组：规模与影响 / 处理漏斗 / 数据质量
+   * ⚠️ 每一项都是**人话 + 数字**（比如 `评价总数 = 7020 条（保留 4115）`）
+   */
+  sections?: Array<{ title: string; items: Array<{ label: string; value: string }> }>
 }
 
 export async function getBrief(): Promise<BriefResp> {

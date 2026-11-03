@@ -30,6 +30,23 @@ const dataType = ref<'review' | 'product' | 'sales'>('sales')
 const uploading = ref(false)
 const pct = ref(0)
 const result = ref<IngestResult | null>(null)
+
+/**
+ * 兼容两种 warnings 形状（2026-11-03 ✅）
+ *   · 新：`{code, message, hint}` 对象
+ *   · 旧：纯字符串（后端没升级时也能显示 ✅）
+ */
+function msgOf(w: unknown): string {
+  if (typeof w === 'string') return w
+  const o = w as { message?: string }
+  return o?.message ?? String(w)
+}
+
+function hintOf(w: unknown): string {
+  if (typeof w === 'string') return ''
+  const o = w as { hint?: string }
+  return o?.hint ?? ''
+}
 const errorMsg = ref('')
 /** 上传历史（本次会话，不落库 ✅）*/
 const history = ref<IngestResult[]>([])
@@ -196,7 +213,10 @@ const TYPES = [
 
       <!-- 🚨 平台传错时，这里就是"为什么 0 条" -->
       <div v-if="result.warnings?.length" class="ingest__warn">
-        <div v-for="(w, i) in result.warnings" :key="i" class="ingest__warn-line">{{ w }}</div>
+        <div v-for="(w, i) in result.warnings" :key="i" class="ingest__warn-line">
+            <span class="ingest__warn-msg">{{ msgOf(w) }}</span>
+            <span v-if="hintOf(w)" class="ingest__warn-hint">→ {{ hintOf(w) }}</span>
+          </div>
       </div>
 
       <div class="ingest__next">
@@ -386,6 +406,15 @@ const TYPES = [
     border-left: 3px solid var(--el-color-warning);
     border-radius: 0 $radius-sm $radius-sm 0;
     background: var(--el-color-warning-light-9);
+  }
+
+  &__warn-msg {
+    font-weight: 500;
+  }
+
+  &__warn-hint {
+    margin-left: 4px;
+    color: var(--el-color-primary);
   }
 
   &__warn-line {

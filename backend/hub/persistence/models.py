@@ -123,6 +123,75 @@ class Record(Base):
     )
 
 
+class ImageAsset(Base):
+    """图片级明细（image_asset）—— 2026-11-03 新增
+
+    **为什么要这张表**
+        `review_feature` 存的是**一条评价合并后的结果**（多图取最严重 ✅）
+        → 单图信息被丢掉了 ✅ ✗
+        → 后果：
+            · 没法回答「这条评价的第 3 张是破损，另外 2 张正常」
+            · 没法做**人工复核**（复核哪一张？）
+            · 没法做**模型迭代**（单图没有 ground truth）
+        所以图片级明细要单独落一张表 ✅
+
+    **和 review_feature 的关系**
+        · `image_asset` 是**事实**（每张图一条）
+        · `review_feature` 是**聚合视图**（把同一评价的图合并）
+        · 计算规则不变：取最严重的 defect / max severity ✅
+        · 人工复核改了 `final_defect` 后，**合并时优先用它** ✅
+
+    **隐私红线**
+        只存**标签和哈希**，不存像素、不存原图路径（`source_file` 只是文件名 ✅）
+        → 和 `review_feature` 同一条规矩：图片阅后即焚 ✅
+    """
+    __tablename__ = "image_asset"
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True,
+        server_default=text("gen_random_uuid()"))
+    review_id: Mapped[UUID] = mapped_column(
+        ForeignKey("record.id", ondelete="CASCADE"), nullable=False, index=True)
+    batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ingest_batch.id", ondelete="SET NULL"), nullable=True)
+
+    # ---------- 溯源 ----------
+    #: 图片在包里的文件名（**对账/复核时能追到是哪张** ✅）
+    source_file: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 用的是哪一级匹配（manifest / url_basename / directory / filename / loose）
+    match_tier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 感知哈希（去重用 ✅）
+    phash_bit: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 精确哈希（判重 / 复核时确认同一张 ✅）
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # ---------- 模型打标（单图）----------
+    defect_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    color_deviation: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    vision_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+    # ---------- 人工复核（P3 闭环 ✅）----------
+    #: 复核人（null = 还没人复核 ✅）
+    reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 人工最终判定（合并 review_feature 时**优先用它** ✅）
+    final_defect: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+
+    __table_args__ = (
+        Index("ix_image_asset_review", "review_id"),
+        Index("ix_image_asset_phash", "phash_bit"),
+        # 复核队列：按"还没复核 + 置信度低"筛 ✅
+        Index("ix_image_asset_pending_review", "reviewed_at", "confidence"),
+    )
+
+
 class ReviewFeature(Base):
     """多模态特征：只存标签与哈希，无原图（阅后即焚）。"""
     __tablename__ = "review_feature"
