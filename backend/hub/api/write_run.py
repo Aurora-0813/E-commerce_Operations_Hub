@@ -124,6 +124,8 @@ def get_run(run_id: str, request: Request,
             "run_id": str(row.id), "kind": row.kind, "status": row.status,
             "trace_id": row.trace_id,
             "current_stage": row.current_stage,
+            # **阶段内进度**（2026-11-04 加）—— 前端进度条靠它 ✅
+            "progress": (row.params or {}).get("progress"),
             "attempt": row.attempt,
             "error": row.error,
             "degraded": getattr(row, "degraded", None),
@@ -216,3 +218,123 @@ def post_handle(body: HandleIn, request: Request,
     return {"run_id": rid, "cluster_id": cid, "status": "QUEUED",
             "message": "已排队；用 GET /api/runs/{run_id} 轮询，"
                        "DONE 后 params.agent_run_id 是结果 id"}
+
+# ════════════════════════════════════════════════════ 3. POST /runs/{id}/cancel
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str, request: Request,
+               user: AuthUser = Depends(get_current_user)):
+    """**停止**一条正在跑/在排队的链（2026-11-04 加）。
+
+    用户的诉求："开始分析后要有停止任务的按钮，**真的在后端停止**" ✅
+
+    怎么做到"真的停"：
+        ① 这里把 `pipeline_run.status` 改成 **`CANCELLED`**
+        ② worker 在**每个阶段结束时**都会查一次状态（见 `worker.py`）
+           → 看到 `CANCELLED` 就立刻退出，**不再推进下一个阶段** ✅
+        ③ 如果任务还在 `QUEUED`（worker 还没取）
+           → 状态改了之后，worker 取到时会**直接跳过** ✅
+    局限（如实说）：
+        正在**运行中的单个阶段**（比如一次 LLM 归因）不会被打断 ——
+        它会跑完这一阶段才停 ✅（阶段内部没有协作式取消，这是已知边界 ✅）
+    """
+    from datetime import datetime, timezone
+    from uuid import UUID
+
+    from hub.audit import write as audit_write
+    from hub.persistence.db import get_session
+    from hub.persistence.models import PipelineRun
+
+    try:
+        rid = UUID(run_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            {"code": "BAD_ID", "message": "run_id 不是合法 UUID",
+                             "trace_id": _trace_id(request)}) from None
+
+    with get_session() as s:
+        row = s.get(PipelineRun, rid)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                {"code": "NOT_FOUND", "message": "任务不存在",
+                                 "trace_id": _trace_id(request)})
+        if row.status not in ("QUEUED", "RUNNING"):
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                {"code": "NOT_ACTIVE",
+                                 "message": f"这条任务已经是 {row.status}，停不了",
+                                 "trace_id": _trace_id(request)})
+        row.status = "CANCELLED"
+        row.error = "用户手动停止"
+        row.finished_at = datetime.now(timezone.utc)
+        prev = row.current_stage
+        s.commit()
+
+    audit_write(actor=user.email, action="run.cancel",
+                resource=f"run:{rid}", detail={"stage": prev})
+    return {"ok": True, "run_id": str(rid), "status": "CANCELLED",
+            "stopped_at_stage": prev,
+            "message": "已停止（当前阶段跑完就停，不会再进下一阶段）"}
+
+
+# ════════════════════════════════════════════════════ 4. DELETE /runs/{id}
+@router.delete("/runs/{run_id}")
+def delete_run(run_id: str, request: Request,
+               user: AuthUser = Depends(get_current_user)):
+    """**删除**一条任务（连同它的分析产物）。
+
+    用户的诉求："删除任务，真的在后端删除" ✅
+
+    删什么：
+        · `pipeline_run`（任务本身）
+        · `issue_cluster`（这次跑出来的簇）
+        · `action_proposal`（挂在那些簇上的提案）
+        ⚠️ **不删**：原始业务数据（record / sales_daily / image_asset）——
+           那是"你上传的数据"，删任务不该动它 ✅
+
+    如果任务还在跑 → **先停止再删**（避免 worker 还在写 ✅）
+    """
+    from uuid import UUID
+
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import select
+
+    from hub.audit import write as audit_write
+    from hub.persistence.db import get_session
+    from hub.persistence.models import (
+        ActionProposal, IssueCluster, PipelineRun,
+    )
+
+    try:
+        rid = UUID(run_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            {"code": "BAD_ID", "message": "run_id 不是合法 UUID",
+                             "trace_id": _trace_id(request)}) from None
+
+    with get_session() as s:
+        row = s.get(PipelineRun, rid)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                {"code": "NOT_FOUND", "message": "任务不存在",
+                                 "trace_id": _trace_id(request)})
+
+        # 还在跑 → 先标 CANCELLED（worker 会在下一阶段边界退出 ✅）
+        if row.status in ("QUEUED", "RUNNING"):
+            row.status = "CANCELLED"
+            row.error = "用户手动删除"
+            s.commit()
+
+        n_prop = len(s.scalars(
+            select(ActionProposal.id).where(ActionProposal.run_id == rid)).all())
+        n_clu = len(s.scalars(
+            select(IssueCluster.id).where(IssueCluster.run_id == rid)).all())
+        # 先删提案（有外键指向簇 ✅），再删簇，最后删任务 ✅
+        s.execute(sa_delete(ActionProposal).where(ActionProposal.run_id == rid))
+        s.execute(sa_delete(IssueCluster).where(IssueCluster.run_id == rid))
+        s.execute(sa_delete(PipelineRun).where(PipelineRun.id == rid))
+        s.commit()
+
+    audit_write(actor=user.email, action="run.delete", resource=f"run:{rid}",
+                detail={"clusters": n_clu, "proposals": n_prop})
+    return {"ok": True, "run_id": str(rid),
+            "deleted": {"clusters": n_clu, "proposals": n_prop},
+            "message": f"已删除（簇 {n_clu} 个 / 提案 {n_prop} 条）"}

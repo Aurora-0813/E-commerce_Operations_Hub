@@ -11,10 +11,10 @@
 //   · 同时**就是下一次微调的标注集** ✅
 // ══════════════════════════════════════════════════════════════
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
-  ElButton, ElCard, ElMessage, ElOption, ElPagination, ElSelect, ElTable,
-  ElTableColumn, ElTag,
+  ElButton, ElCard, ElImage, ElMessage, ElOption, ElPagination, ElSelect,
+  ElTable, ElTableColumn, ElTag,
 } from 'element-plus'
 
 import ErrorState from '@/components/ErrorState.vue'
@@ -23,7 +23,7 @@ import PageLoading from '@/components/PageLoading.vue'
 import LabelTag from '@/components/LabelTag.vue'
 import { DEFECT } from '@/config/labels'
 import {
-  DEFECT_OPTIONS, getImageStats, listImages, reviewImage,
+  DEFECT_OPTIONS, fetchThumb, getImageStats, listImages, reviewImage,
   type Defect, type ImageAssetRow, type ImageStats,
 } from '@/api/images'
 import { useUserStore } from '@/stores/user'
@@ -61,6 +61,8 @@ async function load(): Promise<void> {
     items.value = list
     stats.value = st
     page.value = 1
+    // **只拉当前页的缩略图**（20 张，别一次拉 200 张 ✅）
+    await loadThumbs(list.slice(0, SIZE))
   } catch (e) {
     error.value = e
   } finally {
@@ -70,6 +72,34 @@ async function load(): Promise<void> {
 
 // ---------- 复核 ----------
 const actingId = ref<string>('')
+
+// ══════════════════════════════════════════════════════════════
+//  **缩略图**（2026-11-03 加）—— 用户："人工审核为什么前端不显示图片？"
+// ══════════════════════════════════════════════════════════════
+// 不显示图 → 复核没有意义 ✅（不看到图怎么判断"破损还是开线"✅）
+// 但图片是**阅后即焚**的 ✅ → 只能**按需临时取**（后端从原包里现读，内存过一道）
+// 取到的是 **objectURL**（axios 带 token 拿 blob 造的 ✅）
+const thumbs = reactive<Record<string, string>>({})
+const thumbErr = reactive<Record<string, boolean>>({})
+
+async function loadThumbs(rows: ImageAssetRow[]): Promise<void> {
+  for (const r of rows) {
+    if (thumbs[r.id] || thumbErr[r.id]) continue
+    try {
+      const t = await fetchThumb(r.id)
+      thumbs[r.id] = t.url
+      if (t.missing) thumbErr[r.id] = true
+    } catch {
+      // **404 = 原图包已经没了**（正常情况：阅后即焚 ✅）→ 显示"图已销毁"
+      thumbErr[r.id] = true
+    }
+  }
+}
+
+/** 切页/关页面时**释放 objectURL**（否则内存泄漏 ✅）*/
+onUnmounted(() => {
+  for (const u of Object.values(thumbs)) URL.revokeObjectURL(u)
+})
 /** 展开的"改判定"行 */
 const editingId = ref<string>('')
 const editDefect = ref<Defect>('none')
@@ -85,7 +115,7 @@ async function submitReview(row: ImageAssetRow, defectValue: Defect): Promise<vo
   actingId.value = row.id
   try {
     await reviewImage(row.id, defectValue, editNote.value || undefined)
-    ElMessage.success('已复核 ✅ 这条评价的合并结果已按人工判定更新')
+    ElMessage.success('已复核 这条评价的合并结果已按人工判定更新')
     editingId.value = ''
     editNote.value = ''
     await load()
@@ -118,10 +148,10 @@ onMounted(load)
         <h2 class="imgrev__title">图片复核</h2>
         <p class="imgrev__note">
           AI 打的标<b>不直接进赔偿决策</b> —— 低置信度 / 高风险缺陷在这里过一遍人眼。
-          复核结果会<b>优先覆盖</b>模型结论，也<b>就是下次微调的标注数据</b> ✅
+          复核结果会<b>优先覆盖</b>模型结论，也<b>就是下次微调的标注数据</b>
         </p>
       </div>
-      <ElButton :loading="loading" @click="load()">刷新</ElButton>
+      <ElButton :loading="loading" @click="load">刷新</ElButton>
     </header>
 
     <!-- 概况 -->
@@ -147,16 +177,16 @@ onMounted(load)
     <!-- 筛选 -->
     <ElCard shadow="never" class="imgrev__filter">
       <div class="imgrev__filter-row">
-        <ElSelect v-model="pendingOnly" class="imgrev__sel" @change="load()">
+        <ElSelect v-model="pendingOnly" class="imgrev__sel" @change="load">
           <ElOption :value="true" label="只看待复核" />
           <ElOption :value="false" label="全部" />
         </ElSelect>
-        <ElSelect v-model="onlyLow" class="imgrev__sel" @change="load()">
+        <ElSelect v-model="onlyLow" class="imgrev__sel" @change="load">
           <ElOption :value="false" label="不限置信度" />
           <ElOption :value="true" label="只看低置信度" />
         </ElSelect>
         <ElSelect v-model="defect" class="imgrev__sel" clearable placeholder="全部缺陷类型"
-                  @change="load()">
+                  @change="load">
           <ElOption v-for="d in DEFECT_OPTIONS" :key="d" :value="d" :label="d" />
         </ElSelect>
         <span class="imgrev__count">共 {{ items.length }} 条</span>
@@ -164,13 +194,25 @@ onMounted(load)
     </ElCard>
 
     <PageLoading v-if="loading" :rows="6" />
-    <ErrorState v-else-if="error" :error="error" @retry="load()" />
+    <ErrorState v-else-if="error" :error="error" @retry="load" />
     <EmptyState v-else-if="!items.length"
-                :description="pendingOnly ? '没有待复核的图片 ✅ 全部处理完了' : '还没有图片明细'"
-                hint="图片明细来自「数据接入 → 图片包（zip）」的处理结果；先上传一个图片包 ✅" />
+                :description="pendingOnly ? '没有待复核的图片 全部处理完了' : '还没有图片明细'"
+                hint="图片明细来自「数据接入 → 图片包（zip）」的处理结果；先上传一个图片包" />
 
     <ElCard v-else shadow="never" class="imgrev__table-card">
       <ElTable :data="shown" size="small" row-key="id">
+        <ElTableColumn label="图" width="86">
+          <template #default="{ row }">
+            <ElImage v-if="thumbs[row.id]" :src="thumbs[row.id]" fit="cover"
+                     :preview-src-list="[thumbs[row.id]]" preview-teleported
+                     class="imgrev__thumb" />
+            <span v-else-if="thumbErr[row.id]" class="imgrev__sub" title="图片阅后即焚，原包已不在">
+              已销毁
+            </span>
+            <span v-else class="imgrev__sub">…</span>
+          </template>
+        </ElTableColumn>
+
         <ElTableColumn label="原文件名" width="160">
           <template #default="{ row }">
             <code class="imgrev__file">{{ row.source_file ?? '—' }}</code>
@@ -227,7 +269,7 @@ onMounted(load)
                 <ElOption v-for="d in DEFECT_OPTIONS" :key="d" :value="d" :label="d" />
               </ElSelect>
               <input v-model="editNote" class="imgrev__note-input"
-                     placeholder="备注（为什么改，最有价值 ✅）" />
+                     placeholder="备注（为什么改，最有价值）" />
               <div class="imgrev__edit-actions">
                 <ElButton size="small" type="primary" :loading="actingId === row.id"
                           @click="(row: unknown) => submitReview(row as ImageAssetRow, editDefect)">
@@ -239,7 +281,7 @@ onMounted(load)
 
             <!-- 已复核 -->
             <template v-else>
-              <span class="imgrev__sub">✅ 已复核</span>
+              <span class="imgrev__sub"> 已复核</span>
             </template>
           </template>
         </ElTableColumn>
@@ -343,6 +385,12 @@ onMounted(load)
     margin-left: auto;
     font-size: 12px;
     color: var(--hub-text-secondary);
+  }
+
+  &__thumb {
+    width: 56px;
+    height: 56px;
+    border-radius: $radius-sm;
   }
 
   &__file {

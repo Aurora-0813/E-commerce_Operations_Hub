@@ -114,17 +114,17 @@ function fmtPct(v: number | null): string {
       <div>
         <h2 class="retro__title">复盘报告</h2>
         <div class="retro__sub">
-          方法和判据：<b>双重差分（DID）+ bootstrap 区间</b> —— 区间跨 0 就不下结论 ✅
+          方法和判据：<b>双重差分（DID）+ bootstrap 区间</b> —— 区间跨 0 就不下结论
         </div>
       </div>
       <div class="retro__actions">
-        <ElButton :icon="Refresh" :loading="running" @click="doRerun()">重新复盘</ElButton>
-        <ElButton :icon="Download" @click="doExport()">导出 xlsx</ElButton>
+        <ElButton :icon="Refresh" :loading="running" @click="doRerun">重新复盘</ElButton>
+        <ElButton :icon="Download" @click="doExport">导出 xlsx</ElButton>
       </div>
     </div>
 
         <!-- ══════════════════════════════════════════════════════════
-         为什么大部分动作"还没有结论"（2026-11-03 加，C ✅）
+         为什么大部分动作"还没有结论"（2026-11-03 加，C）
          ══════════════════════════════════════════════════════════ -->
     <ElCard v-if="!guideClosed" shadow="never" class="retro__guide">
       <template #header>
@@ -144,7 +144,7 @@ function fmtPct(v: number | null): string {
         </p>
         <p>
           <b>区间跨 0 → 不能下结论</b>（可能是巧合）。
-          所以我们宁可显示「等观察窗口」，也<b>不在窗口没到时宣布成功</b> ✅
+          所以我们宁可显示「等观察窗口」，也<b>不在窗口没到时宣布成功</b>
         </p>
         <p class="retro__guide-muted">
           当前：<b>{{ counts.POSITIVE + counts.NEGATIVE + counts.INCONCLUSIVE }}</b> 条已有结论 ·
@@ -154,7 +154,7 @@ function fmtPct(v: number | null): string {
     </ElCard>
 
 <PageLoading v-if="loading && !items.length" :rows="3" />
-    <ErrorState v-else-if="error" :error="error" @retry="load()" />
+    <ErrorState v-else-if="error" :error="error" @retry="load" />
 
     <template v-else>
       <!-- 汇总四卡 -->
@@ -187,9 +187,9 @@ function fmtPct(v: number | null): string {
         <div class="retro__why">
           <div class="retro__why-title">为什么不现在就下结论？</div>
           <ul>
-            <li>动作刚执行完，<b>效果还没显现</b>；现在算 DID 等于用噪音判业务效果 ✅</li>
-            <li>我们的判据是<b>区间不跨 0</b>；窗口没到，区间必然很宽 → 只会得到 INCONCLUSIVE ✅</li>
-            <li>宁可显示"还没到"，也不拿一个假数字交差 ✅</li>
+            <li>动作刚执行完，<b>效果还没显现</b>；现在算 DID 等于用噪音判业务效果</li>
+            <li>我们的判据是<b>区间不跨 0</b>；窗口没到，区间必然很宽 → 只会得到 INCONCLUSIVE</li>
+            <li>宁可显示"还没到"，也不拿一个假数字交差</li>
           </ul>
         </div>
       </ElCard>
@@ -221,9 +221,9 @@ function fmtPct(v: number | null): string {
           </div>
         </div>
         <div class="retro__legend">
-          ⚠️ 现在接口只返回<b>点估计</b> + <code>confidence</code>，**没有 <code>ci_low</code> /
-          <code>ci_high</code>** → 所以画不出误差棒。
-          等后端把区间返回了，这排就能加上（脚本已经支持两种形状 ✅）。
+          ⚠️ 现在接口只返回<b>点估计</b> + <code>confidence</code>，没有 <code>ci_low</code> /
+          <code>ci_high</code> → 所以画不出误差棒。
+          等后端把区间返回了，这排就能加上（脚本已经支持两种形状）。
         </div>
       </ElCard>
 

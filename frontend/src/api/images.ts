@@ -95,3 +95,28 @@ export async function unreviewImage(id: string): Promise<{ ok: boolean }> {
   const { data } = await http.post<{ ok: boolean }>(`/api/images/${id}/unreview`)
   return data
 }
+
+/**
+ * **复核时临时取一张图**（2026-11-03 加）
+ *
+ * ⚠️ 为什么不用 `<img :src="/api/...">`：
+ *    `<img>` 发的是**裸 GET，不带 Authorization** ✅ → 会 401 ✅
+ *    → 所以走 axios 拿 **blob** → 前端造 objectURL ✅
+ *
+ * ⚠️ 图片**不落库**（M2 阅后即焚 ✅）→ 这个接口是**按需从原包里现取**，
+ *    内存里过一道，响应带 `no-store` ✅
+ *    → 原包被删了就 404，`hint` 会告诉你"重新传一次图片包" ✅
+ */
+export async function fetchThumb(
+  id: string,
+): Promise<{ url: string; missing: boolean }> {
+  const resp = await http.get(`/api/images/${id}/thumb`, {
+    responseType: 'blob',
+    // **不要转成 JSON**（二进制 ✅）
+    transformResponse: [(d: unknown) => d],
+  })
+  // ⚠️ 后端对「原图已销毁」**不返 404**，而是返占位图 + 这个头 ✅
+  //    （404 会让浏览器控制台每条都报红 ✅）
+  const missing = String(resp.headers['x-thumb-missing'] ?? '') === '1'
+  return { url: URL.createObjectURL(resp.data as Blob), missing }
+}

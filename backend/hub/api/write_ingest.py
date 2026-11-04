@@ -168,7 +168,7 @@ async def ingest(
         batch_id, existed = IngressRepo().save(batch, records, report)
 
         # ---------- ④ 审计（**每次上传都记** ✅）----------
-        audit_write(actor=f"user:{user.id}", action="data.ingest",
+        audit_write(actor=user.email, action="data.ingest",
                     resource=f"ingest_batch:{batch_id}",
                     detail={"file": name, "platform": platform,
                             "data_type": data_type, "bytes": total,
@@ -225,6 +225,133 @@ async def ingest(
 #   ③ 耗时差一个量级：xlsx 3~8 秒；**图片包 50 张要 50 次 Vision**（几分钟 ✅）
 #   ④ 合规红线：**图片只在本地沙箱处理，永不出网** ✅
 #      `multimodal/vision.py` 硬编码只连本地，`cloud_guard` 对图片直接抛异常 ✅
+# ══════════════════════════════════════════════════════════════
+#  **库里现有多少数据**（2026-11-03 加）
+# ══════════════════════════════════════════════════════════════
+# 用户反馈："数据接入模块，库里现在有多少数据 是空的" ✅
+#   原来的页面只有上传区 ✅ → 不知道"库里有什么、分析到哪一步了" ✅ ✗
+#   这里给一个总览：各表行数 + 最近一次导入 + 最近一次分析状态 ✅
+@router.get("/ingest/summary")
+def ingest_summary(user: AuthUser = Depends(get_current_user)):
+    """数据接入页顶部的「现有数据概览」。
+
+    返回：
+        rows:      各业务表的行数（评价/商品/销售/簇/提案/图片明细）
+        latest:    最近一条导入批次（文件名/平台/行数/时间）
+        analysis:  最近一次全链的状态（RUNNING/DONE + 当前阶段 + 时间）
+        hints:     **人话提示**（"还没导入过" / "有数据但没分析过" ✅）
+    """
+    from sqlalchemy import func, select
+
+    from hub.persistence.db import get_session
+    from hub.persistence.models import (
+        ActionProposal, ImageAsset, IngestBatch, IssueCluster, PipelineRun,
+        Record, ReviewFeature, SalesDaily,
+    )
+
+    with get_session() as s:
+        # **当前这一次**的 run（簇/提案只算它 ✅）
+        from hub.persistence.current import current_run_id
+        _cur_run = current_run_id(s)
+
+        def _n(model, where=None) -> int:
+            stmt = select(func.count()).select_from(model)
+            if where is not None:
+                stmt = stmt.where(where)
+            return int(s.scalar(stmt) or 0)
+
+        rows = {
+            "record_total": _n(Record),
+            "record_review": _n(Record, Record.data_type == "review"),
+            "record_product": _n(Record, Record.data_type == "product"),
+            "review_feature": _n(ReviewFeature),
+            "image_asset": _n(ImageAsset),
+            "spu": 50,          # `spu_catalog` 是商品目录，用 count 更快的方式见下
+            "sales_daily": _n(SalesDaily),
+        # ⚠️ **2026-11-04 加：真实销量（件）**
+        #    用户问："评价 7,019 为什么比销售 4,500 多？"
+        #    → 因为 `sales_daily` 的一行 = **一个商品在某一天的汇总** ✅
+        #      不是"一单" ✅ → 界面写「4,500 行」会被误读成"4,500 单" ✅ ✗
+        #    → 真实销量 = sum(units) = **41 万件** → 评价率 1.71% 才对得上 ✅
+        "sales_units": int(s.scalar(
+            select(func.coalesce(func.sum(SalesDaily.units), 0))) or 0),
+        "sales_days": int(s.scalar(
+            select(func.count(func.distinct(SalesDaily.stat_date)))) or 0),
+            # ⚠️ **簇数只算「当前这一次」**（2026-11-03 修）
+            #    每跑一次全链都会插一批新簇、旧的保留当历史 ✅
+            #    直接 count 全表 → 显示 241（所有历史总和）✅ ✗ → 用户以为有 241 个问题 ✅
+            "clusters": _n(IssueCluster, IssueCluster.run_id == _cur_run),
+            "proposals": _n(ActionProposal),
+            "batches": _n(IngestBatch),
+        }
+        # 商品数单独查（`spu_catalog` 表名可能不同 → 用 raw 兜底）
+        try:
+            from hub.persistence.models import SpuCatalog
+            rows["spu"] = _n(SpuCatalog)
+        except Exception:                       # noqa: BLE001
+            rows["spu"] = 0
+
+        # 最近一条导入
+        latest = s.scalars(
+            select(IngestBatch).order_by(IngestBatch.created_at.desc()).limit(1)
+        ).first()
+        latest_out = None if latest is None else {
+            "file": latest.file_name, "platform": latest.platform,
+            "rows": latest.row_total, "kept": latest.row_kept,
+            "status": latest.status,
+            "at": latest.created_at.isoformat() if latest.created_at else None,
+        }
+
+        # 最近一次全链
+        run = s.scalars(
+            select(PipelineRun).where(PipelineRun.kind == "full")
+            .order_by(PipelineRun.created_at.desc()).limit(1)
+        ).first()
+        # 注意**两张表**（2026-11-04 修，界面被骗过）
+        #    pipeline_run = **队列任务**（跑没跑完，worker 用）
+        #    analysis_run = **分析结果批**（产物属于哪一次，外键从 issue_cluster 指过来）
+        #    原来只报 pipeline_run，会出现「任务 DEAD 但 20 个簇好好地在那」
+        from hub.persistence.models import AnalysisRun
+        ar = s.scalars(
+            select(AnalysisRun).order_by(AnalysisRun.created_at.desc()).limit(1)
+        ).first()
+        analysis_out = None if run is None else {
+            "run_id": str(run.id), "status": run.status,
+            "current_stage": (run.params or {}).get("progress", {}).get("stage")
+                              or run.current_stage,
+            "stage_pct": (run.params or {}).get("progress", {}).get("pct"),
+            "started": run.started_at.isoformat() if run.started_at else None,
+            "finished": run.finished_at.isoformat() if run.finished_at else None,
+            "degraded": bool(run.degraded),
+            # 产物侧（判断分析到底成没成，以它为准）
+            "result_id": str(ar.id) if ar else None,
+            "result_status": ar.status if ar else None,
+        }
+
+    # **人话提示**（前端直接显示 ✅）
+    hints: list[str] = []
+    if rows["record_review"] == 0:
+        hints.append("库里还没有评价数据 —— 先上传一个「评价」类型的文件")
+    elif rows["clusters"] == 0:
+        hints.append("有评价但还没分析过 —— 点下面的「开始分析」")
+    if analysis_out and analysis_out["status"] in ("QUEUED", "RUNNING"):
+        _pct = analysis_out.get("stage_pct")
+        _st = analysis_out["current_stage"] or "准备中"
+        hints.append(f"分析正在跑（{_st}" + (f" {_pct}%" if _pct is not None else "") + "）")
+    # 任务状态和产物打架时，明确告诉用户以结果为准（2026-11-04）
+    if (analysis_out and rows['clusters'] > 0
+            and analysis_out.get('result_status') == 'DONE'
+            and analysis_out['status'] in ('DEAD', 'FAILED', 'CANCELLED')):
+        hints.append(
+            f'分析已完成（{rows["clusters"]} 个问题、{rows["proposals"]} 条提案）—— '
+            f'队列任务状态是 {analysis_out["status"]}（历史遗留，结果不受影响）')
+    if rows["record_review"] > 0 and rows["clusters"] > 0 and not hints:
+        hints.append("数据和分析结果都在 ✅ 有新数据就上传，然后重新分析")
+
+    return {"rows": rows, "latest": latest_out, "analysis": analysis_out,
+            "hints": hints}
+
+
 @router.post("/ingest/images/precheck")
 async def precheck_images(
     request: Request,
@@ -492,7 +619,7 @@ async def ingest_images(
                                  "trace_id": tid}) from None
 
         # ---------- 审计（**图片处理必须留痕** ✅）----------
-        audit_write(actor=f"user:{user.id}", action="data.ingest_images",
+        audit_write(actor=user.email, action="data.ingest_images",
                     resource=f"trace:{stats.trace_id}",
                     detail={"file": name, "bytes": total, "vision": v.name,
                             "images": stats.images, "deduped": stats.deduped,

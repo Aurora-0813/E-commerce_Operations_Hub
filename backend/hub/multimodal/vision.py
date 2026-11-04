@@ -208,13 +208,18 @@ class RealVision:
 def get_vision(model: str = "mock") -> VisionModel:
     """按名字取 Vision 实现。
 
-    :param model: 实现名（mock / ollama / real）。Ollama 的实际模型名从
+    :param model: 实现名（mock / **real**（= 本地 ollama）/ ollama）。Ollama 的实际模型名从
                   配置 `HUB_VISION__MODEL` 读（默认 qwen2.5vl:3b）。
                   为什么分开：文本模型改 qwen2.5:3b 时，图片模型必须还是 VLM。
     """
     if model == "mock":
         return MockVision()
-    if model in ("ollama", "qwen", "qwen2.5vl", "local"):
+    # ⚠️ **`real` 必须走本地 ollama**（2026-11-04 修的真 bug）
+    #   原来 `real` 落到最后的 `RealVision()` = **云端实现，尚未接入** ✅
+    #   → 每张图都"降级"→ 0.05 秒/张 → **标签全是假的「其他」** ✅ ✗
+    #   → 而界面写的"8.9 秒/张"是 ollama 的真实速度 ✅
+    #   现在：`real` = 本地 qwen2.5vl ✅（真调模型，慢但标签是真的）
+    if model in ("real", "ollama", "qwen", "qwen2.5vl", "local"):
         from hub.core.config import Settings
 
         s = Settings()

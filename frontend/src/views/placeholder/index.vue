@@ -11,13 +11,13 @@ const title = computed(() => String(route.meta.title ?? '这个页面'))
 
 /** 每页在路线图里的阶段（写清楚，避免"看起来都有了" ✅）*/
 const PLAN: Record<string, string> = {
-  '/problems': '批 2 · 问题全景（⑥⑦⑧⑨⑩ 五张图）',
+  '/problems': '批 2 · 问题全景（五张图）',
   '/proposals': '批 2 · 待批提案列表',
-  '/agent': '批 3 · Agent 任务（⑮⑯ 轨迹 + 每步 token）',
-  '/retro': '批 3 · 复盘报告（⑪⑫⑬⑭ DID 区间图）',
+  '/agent': '批 3 · Agent 任务（轨迹 + 每步 token）',
+  '/retro': '批 3 · 复盘报告（DID 区间图）',
   '/notify': '批 4 · 通知中心（㉑ 未读数 + 标记已读）',
   '/knowledge': '批 4 · 知识库（㉒ DRAFT/PUBLISHED + effective）',
-  '/ops': '批 4 · 运维台（⑰⑱ 日志 + 上传 + 死信重放）',
+  '/ops': '批 4 · 运维台（日志 + 上传 + 死信重放）',
 }
 const plan = computed(() => PLAN[route.path] ?? '待排期')
 </script>

@@ -1,0 +1,61 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "F:\project_summary\E-commerce_Operations_Hub\backend\hub\cli.py", line 1022, in <module>
+    main()
+    ~~~~^^
+  File "F:\project_summary\E-commerce_Operations_Hub\backend\hub\cli.py", line 1004, in main
+    sys.exit(worker(once=args.once, idle=args.idle))
+             ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\project_summary\E-commerce_Operations_Hub\backend\hub\queue\commands.py", line 159, in worker
+    code = run(once=once, idle_s=idle)
+  File "F:\project_summary\E-commerce_Operations_Hub\backend\hub\queue\worker.py", line 481, in run
+    resp = r.xreadgroup(_q.group, me,
+                        {_q.stream: ">"}, count=1, block=5000)
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\commands\core.py", line 8067, in xreadgroup
+    response = self.execute_command("XREADGROUP", *pieces, **options)
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\client.py", line 867, in execute_command
+    return self._execute_command(*args, **options)
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\client.py", line 889, in _execute_command
+    result = conn.retry.call_with_retry(
+        lambda: self._send_command_parse_response(
+    ...<3 lines>...
+        with_failure_count=True,
+    )
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\retry.py", line 132, in call_with_retry
+    raise error
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\retry.py", line 120, in call_with_retry
+    return do()
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\client.py", line 890, in <lambda>
+    lambda: self._send_command_parse_response(
+            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        conn, command_name, *args, **options
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\client.py", line 819, in _send_command_parse_response
+    return self.parse_response(conn, command_name, **options)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\client.py", line 935, in parse_response
+    response = connection.read_response()
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\connection.py", line 1407, in read_response
+    response = self._parser.read_response(
+        disable_decoding=disable_decoding,
+        push_request=push_request,
+        timeout=timeout,
+    )
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\_parsers\resp3.py", line 40, in read_response
+    result = self._read_response(
+        disable_decoding=disable_decoding,
+        push_request=push_request,
+        timeout=timeout,
+    )
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\_parsers\resp3.py", line 65, in _read_response
+    raw = self._buffer.readline(timeout=timeout)
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\_parsers\socket.py", line 117, in readline
+    self._read_from_socket(timeout=timeout)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "D:\Anaconda\envs\e-commerce_operations_hub\Lib\site-packages\redis\_parsers\socket.py", line 67, in _read_from_socket
+    raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
+redis.exceptions.ConnectionError: Connection closed by server.

@@ -17,7 +17,7 @@ import {
   getClusterReviews, getClusterTrend, getProposal,
   type ClusterReview, type ProposalDetail, type WeekPoint,
 } from '@/api/data'
-import { ApiError } from '@/api/client'
+import http, { ApiError } from '@/api/client'
 import { useUserStore } from '@/stores/user'
 import { approveProposal, rejectProposal } from '@/api/write'
 import ErrorState from '@/components/ErrorState.vue'
@@ -148,6 +148,10 @@ const TOOL_LABEL: Record<string, string> = {
   'listing.restore_desc': '回滚商品描述',
   'product.update_price': '修改价格',
   'catalog.query_price': '查价格',
+  // **新加的 3 个工具**（2026-11-04）：不加的话标题会露出 cs.batch_task ✅ ✗
+  'cs.batch_task': '生成客服批量任务',
+  'factory.feedback': '反馈工厂',
+  'hitl.create': '转人工',
 }
 
 /** 差评高亮：把评价里"掉色/起球…"这类问题词标出来（**简单规则，不做过度设计** ✅）*/
@@ -204,17 +208,157 @@ const trendOption = computed(() => ({
   series: [{ type: 'bar', data: trend.value.map((d) => d.reviews), barWidth: 16,
              itemStyle: { borderRadius: [3, 3, 0, 0] } }],
 }))
+
+// ══════════════════════════════════════════════════════════════
+//  「这条建议凭什么？」（2026-11-04 加）
+// ══════════════════════════════════════════════════════════════
+// 背景：用户问「智能处置这一项有什么业务价值」→ 它和提案生成器重复
+//   但它有一样 proposer 没有的东西：证据链 E1/E2/E3 + 推理轨迹
+//   → 所以把它降级成「解释器」，挂在这里：proposer 说做什么，它说凭什么
+const explainOpen = ref(false)
+const explainLoading = ref(false)
+const explainError = ref('')
+const explainResult = ref<{
+  result?: { recommendation?: string; confidence?: number;
+             tool?: string; needs_human?: boolean }
+  steps?: Array<{ name?: string; ms?: number; ok?: boolean }>
+  evidence?: Array<{ ref?: string; source?: string; text?: string }>
+} | null>(null)
+
+/** 打开解释面板：提交 agent 任务（同簇幂等，409 就用已有的）*/
+async function openExplain(): Promise<void> {
+  const cid = String((detail.value?.args as { cluster_id?: string } | undefined)?.cluster_id ?? '')
+  explainOpen.value = true
+  explainError.value = ''
+  explainResult.value = null
+  if (!cid) {
+    explainError.value = '这条提案没关联问题簇（比如调价关心的是商品），没法展开推理'
+    return
+  }
+  explainLoading.value = true
+  try {
+    let rid = ''
+    try {
+      const { data } = await http.post<{ run_id?: string }>('/api/handle', { cluster_id: cid })
+      rid = String(data.run_id ?? '')
+    } catch (e: unknown) {
+      const err = e as { status?: number; runId?: string | null }
+      if (err?.status === 409 && err.runId) rid = err.runId
+      else throw e
+    }
+    if (!rid) throw new Error('没有拿到 run_id')
+
+    // ⚠️ **要两步**（2026-11-04 修的真 bug）
+    //    `POST /api/handle` 返回的是**流水线 run_id**（pipeline_run）✅
+    //    ① 轮询 `GET /api/runs/{run_id}` 等 DONE
+    //    ② 从 `params.agent_run_id` 拿**结果 id**，再 `GET /api/handle/{agent_run_id}`
+    //    我第一版直接拿 run_id 去查 /api/handle/{id} → **agent_run 不存在** ✅ ✗
+    let agentRunId = ''
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 1500))
+      const { data: r } = await http.get<{
+        status?: string
+        params?: { agent_run_id?: string }
+      }>(`/api/runs/${rid}`)
+      if (r.status === 'FAILED' || r.status === 'DEAD') {
+        explainError.value = '这次推理失败了（可能模型不可用），稍后可以重试'
+        return
+      }
+      if (r.status === 'DONE' || r.status === 'DEGRADED') {
+        agentRunId = String(r.params?.agent_run_id ?? '')
+        break
+      }
+    }
+    if (!agentRunId) {
+      explainError.value = '超过 60 秒还没出结果，去系统日志看这条任务'
+      return
+    }
+    const { data: d } = await http.get<{
+      result?: { recommendation?: string; confidence?: number;
+             tool?: string; needs_human?: boolean }
+      steps?: Array<{ name?: string; ms?: number; ok?: boolean }>
+      evidence?: Array<{ ref?: string; source?: string; text?: string }>
+    }>(`/api/handle/${agentRunId}`)
+    explainResult.value = { result: d.result, steps: d.steps, evidence: d.evidence }
+  } catch (e: unknown) {
+    explainError.value = String(e)
+  } finally {
+    explainLoading.value = false
+  }
+}
+
+
+// **工具名 → 业务话术**（2026-11-04）：内部工具名不该露在界面上
+//   注意 labels.ts 里有个 TOOL_LABEL 是字典（不是函数）→ 这里用 toolLabel
+const TOOL_CN: Record<string, string> = {
+  'cs.batch_task': '生成客服批量任务',
+  'review.draft_reply': '生成客服任务单',
+  'factory.feedback': '反馈工厂',
+  'listing.update_desc': '修改商品描述',
+  'listing.restore_desc': '回滚商品描述',
+  'product.update_price': '修改商品价格',
+  'hitl.create': '转人工',
+}
+
+function toolLabel(name?: string): string {
+  return TOOL_CN[name || ''] || '未知动作'
+}
+
 </script>
 
 <template>
   <div class="detail">
     <!-- 返回 -->
     <div class="detail__bar">
-      <ElButton :icon="ArrowLeft" text @click="router.back()">返回</ElButton>
+      <ElButton :icon="ArrowLeft" text @click="router.back">返回</ElButton>
     </div>
 
+    <!-- **解释器**（2026-11-04）：把原来那个「智能处置」页降级成这里 ✅
+         用户问「智能处置有什么业务价值」→ 它和提案生成器重复 ✅
+         但它有证据链 E1/E2/E3 + 轨迹 → 改成解释「这条建议凭什么」✅ -->
+    <div class="detail__explain-bar">
+      <ElButton plain type="primary" size="small" @click="openExplain()">
+        🧠 提案依据
+      </ElButton>
+      <span class="detail__explain-hint">
+        展开看这个簇查了什么、依据哪几条、置信度多少
+      </span>
+    </div>
+
+    <ElDrawer v-model="explainOpen" title="提案依据" size="520px">
+      <div v-if="explainLoading" class="detail__ex-loading">
+        正在推理（约 10 秒）—— 它会查这个簇、读 5 条原文、再看历史战绩
+      </div>
+      <div v-else-if="explainError" class="detail__ex-err">{{ explainError }}</div>
+      <template v-else-if="explainResult">
+        <div class="detail__ex-sec">
+          <div class="detail__ex-label">结论</div>
+          <div class="detail__ex-text">
+            {{ explainResult.result?.recommendation || '（模型没给出文字建议）' }}
+          </div>
+          <div class="detail__ex-meta">
+            置信度 {{ ((explainResult.result?.confidence ?? 0) * 100).toFixed(0) }}%
+            <template v-if="explainResult.result?.tool">
+              ｜ 建议动作：{{ toolLabel(explainResult.result.tool) }}
+            </template>
+            <template v-if="explainResult.result?.needs_human">
+              ｜ **需要人工确认**
+            </template>
+          </div>
+        </div>
+
+        <div v-if="explainResult.evidence?.length" class="detail__ex-sec">
+          <div class="detail__ex-label">它看了什么（证据）</div>
+          <div v-for="(e, i) in explainResult.evidence" :key="i" class="detail__ex-ev">
+            <b>{{ e.ref || ('E' + (i + 1)) }}</b>
+            <span>{{ e.text || e.source }}</span>
+          </div>
+        </div>
+      </template>
+    </ElDrawer>
+
     <PageLoading v-if="loading" :rows="3" chart />
-    <ErrorState v-else-if="error" :error="error" @retry="load()" />
+    <ErrorState v-else-if="error" :error="error" @retry="load" />
 
     <template v-else-if="detail">
       <div class="detail__grid">
@@ -237,25 +381,29 @@ const trendOption = computed(() => ({
           <div class="detail__section-label">为什么做这个动作</div>
           <p class="detail__rationale">{{ detail.rationale }}</p>
 
-          <!-- ⚠️ **2026-11-02 改：不再逐字段 dump 后端 JSON** ✅ -->
-          <!--    用户反馈「太多后端 json 数据，看不懂」✅ -->
-          <!--    现在按**工具类型**渲染成人话：回复草稿就给"回复正文"，改价就给"新价格" ✅ -->
-          <div class="detail__section-label">要做什么（参数由代码构造，不是模型填的 ✅）</div>
+          <!-- ⚠️ 2026-11-02 改：不再逐字段 dump 后端 JSON -->
+          <!--    用户反馈「太多后端 json 数据，看不懂」 -->
+          <!--    现在按工具类型渲染成人话：回复草稿就给"回复正文"，改价就给"新价格" -->
+          <div class="detail__section-label">要做什么（参数由代码构造，不是模型填的）</div>
 
-          <!-- ① 生成回复草稿：重点是那段回复正文 -->
+          <!-- 生成回复草稿：重点是那段回复正文 -->
           <template v-if="detail.tool_name === 'review.draft_reply'">
             <div class="detail__reply">
-              <div class="detail__reply-label">这条回复会发给买家：</div>
+              <div class="detail__reply-label">
+              <!-- ⚠️ 2026-11-04 修：原来是「这条回复会发给买家」——错的 ✅
+                   回复差评是客服的活，我们产出的是话术草稿，不自动发 ✅ -->
+              这是一份客服话术草稿（不会自动发出，由客服在后台执行）：
+            </div>
               <div class="detail__reply-body">{{ String(detail.args.content ?? '（空）') }}</div>
               <div v-if="complianceHits.length" class="detail__reply-flags">
                 ⚠️ 合规检查命中 {{ complianceHits.length }} 处：
                 <code v-for="(h, i) in complianceHits" :key="i">{{ h }}</code>
               </div>
-              <div v-else class="detail__reply-ok">✅ 合规检查通过（无金额承诺 / 无隐私索要 / 无绝对化用语）</div>
+              <div v-else class="detail__reply-ok"> 合规检查通过（无金额承诺 / 无隐私索要 / 无绝对化用语）</div>
             </div>
           </template>
 
-          <!-- ② 改描述：给"新描述" + 商品 -->
+          <!-- 改描述：给"新描述" + 商品 -->
           <template v-else-if="detail.tool_name === 'listing.update_desc'">
             <div class="detail__reply">
               <div class="detail__reply-label">新的商品描述：</div>
@@ -265,7 +413,7 @@ const trendOption = computed(() => ({
             </div>
           </template>
 
-          <!-- ③ 改价格：给"新价格" -->
+          <!-- 改价格：给"新价格" -->
           <template v-else-if="detail.tool_name === 'product.update_price'">
             <div class="detail__reply">
               <div class="detail__reply-label">新价格：</div>
@@ -275,7 +423,7 @@ const trendOption = computed(() => ({
             </div>
           </template>
 
-          <!-- ④ 其他工具：只显示"人话字段"，不 dump 全部 -->
+          <!-- 其他工具：只显示"人话字段"，不 dump 全部 -->
           <template v-else>
             <ElDescriptions :column="1" size="small" border>
               <ElDescriptionsItem v-for="(v, k) in friendlyArgs" :key="k" :label="String(k)">
@@ -284,7 +432,7 @@ const trendOption = computed(() => ({
             </ElDescriptions>
           </template>
 
-          <!-- 技术细节：默认折叠（trace/run/tool_version/原始 args ✅）-->
+          <!-- 技术细节：默认折叠（trace/run/tool_version/原始 args）-->
           <el-collapse class="detail__tech">
             <el-collapse-item title="技术细节（想看原始参数/链路 id 点这里）">
               <ElDescriptions :column="1" size="small" border>
@@ -303,7 +451,7 @@ const trendOption = computed(() => ({
           </div>
         </ElCard>
 
-        <!-- ══════════ 中：依据（**核心卖点** ✅）══════════ -->
+        <!-- ══════════ 中：依据（核心卖点）══════════ -->
         <ElCard shadow="never" class="detail__col detail__col--evidence">
           <template #header>
             <div class="detail__head">
@@ -344,7 +492,7 @@ const trendOption = computed(() => ({
                 <div class="detail__review-text" v-html="highlighted(r.content)" />
               </div>
               <div v-if="reviewTotal > reviews.length" class="detail__review-more">
-                还有 {{ reviewTotal - reviews.length }} 条没显示（这里只列代表样本 + 最近的 ✅）
+                还有 {{ reviewTotal - reviews.length }} 条没显示（这里只列代表样本 + 最近的）
               </div>
             </div>
           </template>
@@ -363,9 +511,9 @@ const trendOption = computed(() => ({
               </div>
               <div class="detail__risk-hint">
                 {{ detail.risk_level === 'L2'
-                  ? '批准后会真的执行；执行完代码会回查一次 ✅'
+                  ? '批准后会真的执行；执行完代码会回查一次'
                   : detail.risk_level === 'L3'
-                    ? 'L3 不自动执行，只转人工工单 ✅'
+                    ? 'L3 不自动执行，只转人工工单'
                     : '低风险，提交后可执行' }}
               </div>
             </div>
@@ -385,8 +533,8 @@ const trendOption = computed(() => ({
           <div v-else class="detail__exp-empty">还没有历史（第一次做这类动作）</div>
 
           <!-- 决定 -->
-          <!-- ⚠️ **2026-11-02 修**：用后端的 `has_pending_task` 判断能不能批 ✅ -->
-          <!--    原来只看 status === PENDING_APPROVAL → 点了 404 ✅ ✗ -->
+          <!-- ⚠️ 2026-11-02 修：用后端的 `has_pending_task` 判断能不能批 -->
+          <!--    原来只看 status === PENDING_APPROVAL → 点了 404 ✗ -->
           <div class="detail__actions">
             <ElTooltip
               :disabled="canApprove"
@@ -395,7 +543,7 @@ const trendOption = computed(() => ({
             >
               <span>
                 <ElButton type="primary" :loading="acting" :disabled="!canApprove"
-                          @click="doApprove()">
+                          @click="doApprove">
                   批准（会真执行）
                 </ElButton>
               </span>
@@ -408,7 +556,7 @@ const trendOption = computed(() => ({
             ⚠️ {{ detail.approve_blocked_reason }}
           </div>
           <div class="detail__actions-hint">
-            批准需要 <b>supervisor</b> 角色；operator 点了会 403（UI 会先隐藏按钮 ✅）
+            批准需要 <b>supervisor</b> 角色；operator 点了会 403（UI 会先隐藏按钮）
           </div>
         </ElCard>
       </div>
@@ -419,7 +567,7 @@ const trendOption = computed(() => ({
           <span class="detail__title">该簇评价周趋势</span>
           <span class="detail__sub">用来判断"这个问题是在变好还是变坏"</span>
         </template>
-        <!-- ⚠️ 空态说清为什么空（2026-11-02 ✅）-->
+        <!-- ⚠️ 空态说清为什么空（2026-11-02）-->
         <EmptyState v-if="!trend.length" compact
                     description="这个簇还没有周趋势数据"
                     hint="按周统计需要这个簇的评价跨越多周；如果都集中在同一周，就没有趋势可画" />
@@ -427,15 +575,15 @@ const trendOption = computed(() => ({
       </ElCard>
     </template>
 
-    <!-- 拒绝抽屉（**必须带原因** ✅）-->
+    <!-- 拒绝抽屉（必须带原因）-->
     <ElDrawer v-model="rejectDrawer" title="拒绝这条提案" size="420px">
-      <div class="detail__drawer-hint">拒绝必须写原因（后端 `min_length=1`，空原因会 422 ✅）</div>
+      <div class="detail__drawer-hint">拒绝必须写原因（后端 `min_length=1`，空原因会 422）</div>
       <el-input v-model="rejectReason" type="textarea" :rows="5"
                 placeholder="例如：这个方案不符合成本要求 / 已经线下处理过了" />
       <div class="detail__drawer-actions">
         <ElButton @click="rejectDrawer = false">取消</ElButton>
         <ElButton type="danger" :loading="acting" :disabled="!rejectReason.trim()"
-                  @click="doReject()">确认拒绝</ElButton>
+                  @click="doReject">确认拒绝</ElButton>
       </div>
     </ElDrawer>
   </div>
@@ -663,6 +811,78 @@ const trendOption = computed(() => ({
     &__grid {
       grid-template-columns: 1fr;
     }
+  }
+}
+
+.detail {
+  &__explain-bar {
+    display: flex;
+    align-items: center;
+    gap: $space-sm;
+    margin-bottom: $space-sm;
+  }
+
+  &__explain-hint {
+    font-size: 11px;
+    color: var(--hub-text-muted);
+  }
+
+  &__ex-loading {
+    padding: $space-lg 0;
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--hub-text-muted);
+  }
+
+  &__ex-err {
+    padding: $space-md;
+    font-size: 13px;
+    color: var(--el-color-danger);
+    background: var(--el-color-danger-light-9);
+    border-radius: $radius-base;
+  }
+
+  &__ex-sec {
+    margin-bottom: $space-lg;
+  }
+
+  &__ex-label {
+    margin-bottom: $space-sm;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--hub-text-muted);
+  }
+
+  &__ex-text {
+    font-size: 14px;
+    line-height: 1.8;
+  }
+
+  &__ex-meta {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--hub-text-muted);
+  }
+
+  &__ex-ev {
+    display: flex;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 12px;
+    line-height: 1.7;
+    border-bottom: 1px dashed var(--hub-border-light);
+
+    b {
+      flex: 0 0 auto;
+      color: var(--el-color-primary);
+    }
+  }
+
+  &__ex-step {
+    padding: 4px 0;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--hub-text-muted);
   }
 }
 </style>

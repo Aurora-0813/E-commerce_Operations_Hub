@@ -46,13 +46,16 @@ from hub.persistence.repo_cluster import ClusterRepo
 #   运营真正会做的是：回复差评管理预期 + 反馈工厂。
 #   真正适合改描述的是「描述本身缺信息」：尺码表没写、色差没提示。
 TOOL_BY_TOPIC = {
-    "quality": "review.draft_reply",        # 质量问题：回复 + 反馈工厂
+    "quality": "cs.batch_task",           # 质量问题：给客服批量任务（含反馈工厂的内容）
     "size": "listing.update_desc",          # 尺码问题：补尺码表
     "desc_mismatch": "listing.update_desc",  # 描述不符：补色差/面料提示
-    "logistics": "review.draft_reply",
-    "service": "review.draft_reply",
-    "misship": "review.draft_reply",
-    "other": "review.draft_reply",
+    "logistics": "cs.batch_task",
+    # ⚠️ 2026-11-04：`review.draft_reply` → `cs.batch_task`
+    #    原因：回复差评是**客服的活** ✅ 运营批的是「要不要投入客服工时集中处理」
+    #    → 产出的是**任务单**（N 条 + 话术 + 优先级），不是"一条回复" ✅
+    "service": "cs.batch_task",
+    "misship": "cs.batch_task",
+    "other": "cs.batch_task",
 }
 
 # topic → 回复里说的"我们会怎么处理"（**流程性表述，泛化没问题**）
@@ -186,7 +189,7 @@ def _primary_spu(members: list, cluster) -> str | None:
 def _build_args(tool: str, cluster, members: list, topic: str, llm: TextLLM,
                 platform: str = "taobao") -> dict:
     """按工具类型构造参数（**代码构造，不让 LLM 填**）。"""
-    if tool == "review.draft_reply":
+    if tool in ("review.draft_reply", "cs.batch_task"):
         remedy = REPLY_REMEDY.get(topic, REPLY_REMEDY["other"])
         texts = _member_texts(members, MAX_REVIEWS_PER_DRAFT)
         # 给 LLM 看 3 条原文就够了：太多会稀释"这一类问题是什么"
@@ -196,12 +199,15 @@ def _build_args(tool: str, cluster, members: list, topic: str, llm: TextLLM,
             listing=listing, remedy=remedy,
         ), max_tokens=200).strip()
         hits = check_compliance(content)
-        return {
+        args = {
             "cluster_id": str(cluster.id),
             "review_ids": [str(m.record_id) for m in members[:MAX_REVIEWS_PER_DRAFT]],
             "content": content,
-            "compliance_flags": flag_strings(hits),
         }
+        # `cs.batch_task` 的参数模型多一个 priority ✅
+        if tool == "cs.batch_task":
+            args["priority"] = getattr(cluster, "priority_tier", None) or "P2"
+        return args
 
     # listing.update_desc
     spu_id = _primary_spu(members, cluster)
@@ -228,6 +234,8 @@ def _build_args(tool: str, cluster, members: list, topic: str, llm: TextLLM,
     new_desc = f"{old.strip()[:200]}【补充说明】{hint}"
     return {
         "platform": platform,
+        # 追溯用（2026-11-04）：让簇明细能对上提案 ✅
+        "cluster_id": str(cluster.id),
         "spu_id": spu_id,
         "description": new_desc[:500],
     }
@@ -301,6 +309,128 @@ def _record_skipped(cluster, run_id, trace_id: str, reason: str) -> None:
 
 
 @traced("m5.propose")
+# ==================== L3：价格异常 → 调价提案 ====================
+
+def _propose_price_anomalies(run_id, trace_id: str, max_n: int = 3) -> list[str]:
+    """**为比价阶段发现的「价格异常」生成 L3 调价提案**（2026-11-04 加）
+
+    ⚠️ **为什么必须补这段**
+        用户问："主管的审批中心为什么没有高风险提案？"
+        → 因为 `TOOL_BY_TOPIC` 里**没有任何 topic 映射到 L3 工具** ✅
+        → `product.update_price`（L3，涉及资金）**从来没被生成过** ✅ ✗
+        → 但 `anomaly` 表里**明明有 8 条价格异常**（京东比淘宝贵 47.6% 且差评率更高）
+        → 这类才是**主管该拍板**的事 ✅
+
+    **判定依据**（来自 anomaly.metric / evidence）
+        kind = `PRICE_UP_QUALITY_DOWN`：某平台**更贵但差评率更高**
+        → 建议把贵的那个平台的价格**对齐到便宜那个平台**
+        → **L3：只生成工单 + 待批准，不自动执行** ✅
+
+    :return: 生成的提案 id 列表
+    """
+    from decimal import Decimal
+
+    from sqlalchemy import select
+
+    from hub.persistence.db import get_session
+    from datetime import datetime, timedelta, timezone
+
+    from hub.persistence.models import (
+        ActionProposal, Anomaly, HitlTask, SkuMapping, SpuCatalog,
+    )
+    from hub.tools.spec import get as get_spec
+
+    spec = get_spec("product.update_price")
+    if spec is None:
+        return []
+
+    made: list[str] = []
+    seen: set[str] = set()
+    with get_session() as s:
+        rows = s.scalars(
+            select(Anomaly).where(Anomaly.type == "price")
+            .order_by(Anomaly.detected_at.desc()).limit(30)).all()
+        for a in rows:
+            m = a.metric or {}
+            ev = a.evidence or {}
+            if m.get("kind") != "PRICE_UP_QUALITY_DOWN":
+                continue
+            spu = a.canonical_spu_id
+            if not spu or spu in seen:
+                continue          # 同一个 SPU 只生成一条 ✅
+            seen.add(spu)
+            prices = ev.get("prices") or {}
+            exp = m.get("expensive_platform")
+            cheap = next((p for p in prices if p != exp), None)
+            if not exp or not cheap or exp not in prices or cheap not in prices:
+                continue
+            if len(made) >= max_n:
+                break
+            # 已被旧提案覆盖的 SPU 跳过（幂等 ✅）
+            dup = s.scalars(select(ActionProposal).where(
+                ActionProposal.tool_name == "product.update_price")).all()
+            if any((d.args or {}).get("spu_id") == spu for d in dup):
+                continue
+
+            # ⚠️ **canonical → 平台商品 ID**（2026-11-04 修的真 bug）
+            #    `anomaly.canonical_spu_id` 是 **canonical**（SPU-0010）
+            #    而 `product.update_price` 的参数 `spu_id` 要的是**平台商品 ID**（JD-0006）
+            #    → 不转换的话 handler 报 `LookupError: 商品不存在：jd/SPU-0010` ✅ ✗
+            plat_spu = s.scalars(
+                select(SkuMapping.platform_spu_id)
+                .where(SkuMapping.canonical_spu_id == spu)
+                .where(SkuMapping.platform == exp)
+                .limit(1)).first()
+            if not plat_spu:
+                continue
+
+            new_price = Decimal(str(prices[cheap]))
+            title = ev.get("title") or spu
+            disparity = m.get("disparity_pct") or 0
+            rr = ev.get("review_rates") or {}
+            rationale = (
+                f"「{title}」在 {exp} 卖 {prices[exp]}，比 {cheap} 的 {prices[cheap]} "
+                f"贵 {disparity:.0f}%，但差评率反而更高"
+                f"（{exp} {rr.get(exp, 0):.1%} vs {cheap} {rr.get(cheap, 0):.1%}）。"
+                f"建议对齐到 {cheap} 的价格 {prices[cheap]} 元 —— 涉及资金，需主管批准。")
+
+            prop = ActionProposal(
+                run_id=run_id, trace_id=trace_id,
+                tool_name=spec.name, tool_version=spec.version,
+                args={"platform": exp, "spu_id": str(plat_spu),
+                      "new_price": str(new_price)},
+                risk_level=str(spec.risk_level),
+                # ⚠️ **格式是「列表套字典」**：`[{"<类别>": "<id>"}]`（2026-11-04 修）
+                #    `approval.py:138` 会这样做：
+                #        refs = {}
+                #        for item in proposal.evidence_refs:
+                #            if isinstance(item, dict): refs.update(item)
+                #    然后 `check_evidence` 按类别取 `refs.get("anomaly")` ✅
+                #    → 我先后写成 `[{"type":..,"id":..}]` 和纯字典，**都不对** ✅ ✗
+                evidence_refs=[{"anomaly": str(a.id)}],
+                rationale=rationale[:400],
+                dry_run=False, status="PENDING_APPROVAL", topic="price",
+            )
+            s.add(prop)
+            s.flush()
+            # ⚠️ **必须同时建 hitl_task**（2026-11-04 修的真 bug）
+            #    我第一版只插了 action_proposal ✅ → 走「批准」时接口报
+            #    「这个提案没有待批任务（可能已批过/已拒/未提交网关）」✅ ✗
+            #    → 因为审批中心是**基于 hitl_task** 工作的（L3 转人工 ✅）
+            task = HitlTask(
+                proposal_id=prop.id,
+                trace_id=trace_id,
+                status="PENDING",
+                assignee="supervisor",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            )
+            s.add(task)
+            made.append(str(prop.id))
+        s.commit()
+    return made
+
+
+
 def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None,
             only_cluster: str | None = None) -> ProposalStats:
     """给 P0/P1 的簇生成提案（写库，不执行）。
@@ -400,7 +530,7 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None,
             continue
 
         topic = _dominant_topic(cluster.id, members)
-        default_tool = TOOL_BY_TOPIC.get(topic, "review.draft_reply")
+        default_tool = TOOL_BY_TOPIC.get(topic, "cs.batch_task")
 
         # ★ 动作经验回灌（M9 → M5 的闭环）
         #
@@ -419,12 +549,12 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None,
 
         # 去重：不同簇可能指向同一个商品（取"出现最多的商品"后更容易撞），
         # 同一个 (工具, 目标) 只出一个提案——否则运营会看到两条一模一样的待办。
-        target = (str(cluster.id) if tool_name == "review.draft_reply"
+        target = (str(cluster.id) if tool_name in ("review.draft_reply", "cs.batch_task")
                   else _primary_spu(list(members), cluster))
         sig = (tool_name, target)
         if sig in seen:
             _record_skipped(cluster, run_id, trace_id,
-                            f"和前面的提案目标相同（{tool_name} → {target}）")
+                            f"和前面的提案目标相同（{tool_name.split('.')[0]} 类动作）")
             stats.skipped.append(f"{cluster.label}（和前面提案目标相同：{target}）")
             continue
         seen.add(sig)
@@ -504,6 +634,18 @@ def propose(max_proposals: int = MAX_PROPOSALS, llm: TextLLM | None = None,
         print(f"      args：{ {k: (v[:40] + '…' if isinstance(v, str) and len(v) > 40 else v) for k, v in args.items() if k != 'review_ids'} }")
 
     stats.elapsed_s = round(time.time() - t0, 2)
+
+    # **L3：价格异常 → 调价提案**（2026-11-04 加）
+    #   用户问：主管的审批中心为什么没有高风险提案？
+    #   → 因为 TOOL_BY_TOPIC 里没有 L3 工具，`product.update_price` 从没被生成过
+    #   → 这里给比价发现的「贵但差评率更高」的 SPU 生成 L3 提案（待主管批）
+    try:
+        _ids = _propose_price_anomalies(run_id, trace_id)
+        if _ids:
+            stats.proposals += len(_ids)
+            print(f"  [L3] 价格异常 → 生成 {len(_ids)} 条调价提案（待主管批）")
+    except Exception as _e:
+        print(f"  [L3] 价格提案生成失败（不影响其他）：{type(_e).__name__}: {_e}")
 
     # 收尾：把这次提案运行标成 DONE（否则 analysis_run 里会一直挂 RUNNING）
     from hub.persistence.repository import RunRepo

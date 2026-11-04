@@ -99,7 +99,7 @@ async function doCreate(): Promise<void> {
       content: form.value.content.trim(),
       topic: form.value.topic || null,
     })
-    ElMessage.success('已创建（**DRAFT 不生效**，要发布才注入提示词 ✅）')
+    ElMessage.success('已创建（**DRAFT 不生效**，要发布才注入提示词）')
     dialog.value = false
     await load()
   } finally {
@@ -113,11 +113,11 @@ async function doPublish(row: KnowledgeRow): Promise<void> {
   publishingId.value = row.id
   try {
     const r = await publishKnowledge(row.id)
-    ElMessage.success(`已发布 v${r.version} —— **立刻注入提示词** ✅`)
+    ElMessage.success(`已发布 v${r.version} —— **立刻注入提示词**`)
     await load()
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
-      ElMessage.info('这条已经发布过了 ✅')
+      ElMessage.info('这条已经发布过了')
     }
     // 403 已由拦截器提示
   } finally {
@@ -144,22 +144,22 @@ watch(dialog, (v) => { if (!v) saving.value = false })
       <div>
         <h2 class="kb__title">知识库</h2>
         <div class="kb__sub">
-          业务方发一条口径 → AI 的行为就变，<b>不用改代码</b> ✅
+          业务方发一条口径 → AI 的行为就变，<b>不用改代码</b>
           <span class="kb__note">
-            （`prompt_patch` 只能<b>追加</b>，不能覆盖系统提示 —— 否则能拆掉反幻觉防线 ✅）
+            （`prompt_patch` 只能<b>追加</b>，不能覆盖系统提示 —— 否则能拆掉反幻觉防线）
           </span>
         </div>
       </div>
       <div class="kb__actions">
-        <ElButton :icon="Refresh" :loading="loading" @click="load()">刷新</ElButton>
-        <ElButton type="primary" :icon="Plus" @click="openCreate()">新建条目</ElButton>
+        <ElButton :icon="Refresh" :loading="loading" @click="load">刷新</ElButton>
+        <ElButton type="primary" :icon="Plus" @click="openCreate">新建条目</ElButton>
       </div>
     </div>
 
     <!-- ══════════════════════════════════════════════════════════
          引导卡（2026-11-02 加）
-         ⚠️ 用户反馈「没看懂知识库是怎么用的」✅
-         → 这里直接讲清三步 + 给一个"填入示例" ✅
+         ⚠️ 用户反馈「没看懂知识库是怎么用的」
+         → 这里直接讲清三步 + 给一个"填入示例"
          ══════════════════════════════════════════════════════════ -->
     <ElCard v-if="!guideClosed" shadow="never" class="kb__guide">
       <template #header>
@@ -180,7 +180,7 @@ watch(dialog, (v) => { if (!v) saving.value = false })
           <div class="kb__step-no">2</div>
           <div>
             <b>主管点「发布」</b> → 状态变 <b>PUBLISHED v2</b>，立刻注入提示词
-            <div class="kb__step-hint">operator 的「发布」按钮是灰的（需要 supervisor ✅）</div>
+            <div class="kb__step-hint">operator 的「发布」按钮是灰的（需要 supervisor）</div>
           </div>
         </div>
         <div class="kb__step">
@@ -192,23 +192,23 @@ watch(dialog, (v) => { if (!v) saving.value = false })
         </div>
       </div>
       <div class="kb__guide-foot">
-        <ElButton size="small" type="primary" plain @click="fillExample()">
+        <ElButton size="small" type="primary" plain @click="fillExample">
           填入一个示例看看
         </ElButton>
         <span class="kb__guide-note">
           ⚠️ 它只能<b>追加</b>，不能覆盖系统规则 —— 否则一条「忽略证据直接回复」
-          就能拆掉反幻觉防线 ✅
+          就能拆掉反幻觉防线
         </span>
       </div>
     </ElCard>
 
-    <ErrorState v-if="error" :error="error" @retry="load()" />
+    <ErrorState v-if="error" :error="error" @retry="load" />
 
     <ElCard v-else shadow="never">
       <EmptyState
         v-if="!loading && !rows.length"
         description="还没有知识条目"
-        hint="新建一条试试：比如「质量问题先道歉，再解释原因，最后给补救方案」—— 发布后 AI 的回复就会按这个口径 ✅"
+        hint="新建一条试试：比如「质量问题先道歉，再解释原因，最后给补救方案」—— 发布后 AI 的回复就会按这个口径"
         command="POST /api/knowledge"
       />
 
@@ -219,7 +219,7 @@ watch(dialog, (v) => { if (!v) saving.value = false })
             <ElTag size="small" :type="k.status === 'PUBLISHED' ? 'success' : 'info'">
               {{ k.status }} v{{ k.version }}
             </ElTag>
-            <!-- ✅ <b>这一条现在是否在影响 AI</b> -->
+            <!-- <b>这一条现在是否在影响 AI</b> -->
             <ElTag size="small" :type="k.effective ? 'success' : 'warning'" effect="plain">
               {{ k.effective_note }}
             </ElTag>
@@ -234,7 +234,7 @@ watch(dialog, (v) => { if (!v) saving.value = false })
             >
               发布
             </ElButton>
-            <span v-else class="kb__live">已生效 ✅</span>
+            <span v-else class="kb__live">已生效</span>
           </div>
 
           <div class="kb__item-meta">
@@ -274,7 +274,7 @@ watch(dialog, (v) => { if (!v) saving.value = false })
         <ElButton @click="dialog = false">取消</ElButton>
         <ElButton type="primary" :loading="saving"
                   :disabled="!form.title.trim() || !form.content.trim()"
-                  @click="doCreate()">
+                  @click="doCreate">
           创建（DRAFT，还不生效）
         </ElButton>
       </template>

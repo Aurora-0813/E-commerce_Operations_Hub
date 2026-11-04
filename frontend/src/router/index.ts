@@ -101,17 +101,17 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   const user = useUserStore()
 
-  // ① 去登录页：已登录就送回工作台
+  // 去登录页：已登录就送回工作台
   if (to.path === '/login') {
     return user.isLoggedIn ? { path: '/dashboard' } : true
   }
 
-  // ② 未登录：跳登录，并记住原来想去的地址（登录后跳回来 ✅）
+  // 未登录：跳登录，并记住原来想去的地址（登录后跳回来 ✅）
   if (!user.isLoggedIn) {
     return { path: '/login', query: { redirect: to.fullPath } }
   }
 
-  // ③ 已登录但内存里没有用户（刷新页面）：用 token 换一次身份
+  // 已登录但内存里没有用户（刷新页面）：用 token 换一次身份
   //    ⚠️ 这里**不 try/catch 吞掉异常**：401 会由 client.ts 清 token 并跳登录 ✅
   if (!user.user) {
     try {

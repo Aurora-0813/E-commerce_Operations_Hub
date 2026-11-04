@@ -107,11 +107,18 @@ def _stage_mm(params: dict) -> None:
 
     pkg = params.get("images")
     if not pkg:
-        pkg = str(IMAGE_PACKAGE)
-        print("    ⚠️ 入队时没有指定 images → **回退到 data/mock/images**"
-              "（仅本地演示 ✅）")
-        print("      生产上应该用 `POST /api/ingest/images` 传包，"
-              "或在 enqueue 时传 images ✅")
+        # ⚠️ **没有指定图片包 → 跳过**（2026-11-03 改，很重要）
+        #   原来会回退到 `data/mock/images`（428 张 ✅）
+        #   → 428 × 8.9 秒 = **63 分钟** ✅ ✗
+        #   → 用户看到"分析进度 16% 卡住不动" ✅ ✗
+        # **正确的业务语义**：
+        #   图片是**独立批次**（`POST /api/ingest/images` → `kind=mm:...` 自己跑 ✅）
+        #   链只负责"文本那条"（导入→降噪→分类→聚类→排序→生成建议 ✅）
+        #   → 链里**不该自己去抓一批图** ✅
+        print("    ⏭️  本次未指定图片包 → **跳过图片阶段** ✅")
+        print("       （图片走独立批次：数据接入 →「图片包（zip）」"
+              "→ 先对账 → 确认处理 ✅）")
+        return
     vision = params.get("vision") or "ollama"
     allow_loose = bool(params.get("allow_loose"))
     if allow_loose:
@@ -155,7 +162,11 @@ def _stage_propose(params: dict) -> None:
 STAGES: list[Stage] = [
     Stage("ingest", "导入导出文件", False, 40, _stage_ingest),
     Stage("dqe", "M1 数据降噪", False, 3, _stage_dqe),
-    Stage("mm", "M2 多模态（图片）", True, 180, _stage_mm),
+    # ⚠️ **M2 图片不在链里**（2026-11-04 移除）
+    #    原因：图片和链**没有数据依赖**（review_feature 不被 M3/M4/M5 读）
+    #    留在链里会让人误以为「要等图片处理完」，单 worker 还会被堵 33 分钟
+    #    现在图片走**独立批次**：POST /api/ingest/images → kind=mm:<sha> 单独跑
+    #    _stage_mm 函数保留（兼容历史 run 的断点续跑）
     Stage("topic", "M3 归因链", True, 220, _stage_topic),
     Stage("align", "M11 同款对齐", False, 2, _stage_align),
     Stage("cluster", "M4 问题簇聚类", True, 35, _stage_cluster),

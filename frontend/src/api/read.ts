@@ -8,12 +8,20 @@ import http from './client'
 
 // ---------- GET /api/today ----------
 /** "要我做" 的一条（待批 / 到期复盘 / 死信 / agent 转人工）*/
+/**
+ * `/api/today` 的一条待办
+ *
+ * ⚠️ **真实形状是 `{text, next_step, detail}`**（2026-11-03 核对 ✅）
+ *    我原来写的是 `{kind, title, resource_id}` → **全不存在** ✅ ✗
+ *    → 导致「要我做 / 等观察窗口 / 知会」三列**渲染不出来** ✅
+ */
 export interface TodayItem {
-  kind: string
-  title: string
-  hint?: string
-  /** 关联资源（点进去用）*/
-  resource_id?: string
+  /** 一句话说明（后端拼好的中文 ✅）*/
+  text: string
+  /** **下一步该做什么**（比如 `hub approve caf6eadd`）*/
+  next_step: string
+  /** 补充细节（日期 / 数量 ✅）*/
+  detail: string
 }
 
 export interface TodayResp {

@@ -308,7 +308,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ① P 档环形
+         * P 档环形
          * @description P0/P1/P2/P3 各几个簇（**加起来 = 库里总数** ✅）
          */
         get: operations["cluster_tiers_api_charts_cluster_tiers_get"];
@@ -328,7 +328,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑦ 簇条数（表格同源）
+         * 簇条数（表格同源）
          * @description 22 个簇的条数 / P 档 / 分数。sort 可取 reviews / priority / label
          */
         get: operations["clusters_api_charts_clusters_get"];
@@ -348,7 +348,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ② 待批趋势
+         * 待批趋势
          * @description 按天统计 hitl_task 的创建数 / 待批数。
          */
         get: operations["hitl_trend_api_charts_hitl_trend_get"];
@@ -368,7 +368,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑨ 差评率趋势
+         * 差评率趋势
          * @description 按天：差评数 / 总数 / 差评率（**有测试保证 bad 不超过 total** ✅）
          */
         get: operations["bad_rate_trend_api_charts_bad_rate_trend_get"];
@@ -388,7 +388,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ③ 等窗口甘特
+         * 等窗口甘特
          * @description 每个动作的观察窗口（baseline_end → observe_end）。**observe_end 是 DATE** ✅（不是 datetime）
          */
         get: operations["observe_timeline_api_charts_observe_timeline_get"];
@@ -408,7 +408,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑫⑬⑭ 复盘报告（DID）
+         * 复盘报告（DID）
          * @description 4 组 DID + **bootstrap 置信区间** + 结论。
          *
          *     ⚠️ **区间跨 0 = 不能下结论** ✅ —— 页面上要能一眼看出来
@@ -434,7 +434,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑱ 日志趋势
+         * 日志趋势
          * @description 按天 + 按 action 分组统计审计条数。
          */
         get: operations["audit_trend_api_audit_trend_get"];
@@ -454,7 +454,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑥ 问题类型饼
+         * 问题类型饼
          * @description 6 类问题的簇数（从 cluster_member → review_topic 取众数 ✅）
          */
         get: operations["topic_distribution_api_charts_topic_distribution_get"];
@@ -474,7 +474,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ④ 簇周趋势
+         * 簇周趋势
          * @description 某个簇按**周**的评价数（用 record.review_time 分周 ✅）
          */
         get: operations["cluster_trend_api_charts_cluster_trend_get"];
@@ -494,7 +494,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑪ GMV TopN
+         * GMV TopN
          * @description 按簇汇总最近 N 天的 GMV（sales_daily 求和 ✅）
          */
         get: operations["gmv_top_api_charts_gmv_top_get"];
@@ -514,7 +514,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑩ 价格散点
+         * 价格散点
          * @description 数据来自 anomaly.evidence.prices 和 review_rates（**真实值，不是编的** ✅）
          */
         get: operations["price_vs_badrate_api_charts_price_vs_badrate_get"];
@@ -534,7 +534,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑧ 簇四因子（只给真实输入）
+         * 簇四因子（只给真实输入）
          * @description 返回**库里的原始输入** + note。
          *
          *     **故意不返回「归一化后的 0~1 因子」** ✅ —— 那需要一个人为公式，而我们没有依据；编出来会让雷达图看起来专业但没有意义 ✅
@@ -556,7 +556,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑮ agent 轨迹与结论
+         * agent 轨迹与结论
          * @description agent_run：4 步轨迹 / 每步工具与参数 / 结论 / Critic 意见 / 状态
          */
         get: operations["get_agent_run_api_handle__run_id__get"];
@@ -576,7 +576,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * ⑯ 每步 token 与耗时
+         * 每步 token 与耗时
          * @description trace_span 的每段。**时长 = end_ts - start_ts** ✅（表里没有 duration 列）
          */
         get: operations["get_agent_trace_api_handle__run_id__trace_get"];

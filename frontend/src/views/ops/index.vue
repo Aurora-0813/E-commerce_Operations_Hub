@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // ══════════════════════════════════════════════════════════════
-//  6 号页：运维台（⑰⑱⑲⑳ + 上传 + 死信重放 + 触发全链）
+//  6 号页：运维台（+ 上传 + 死信重放 + 触发全链）
 //  ⚠️ 这一页**危险操作最多** —— 全部要二次确认 ✅
 //  ⚠️ `/api/health` 返回的是**裸数组**（不是 {checks}）—— 我按真实结构解析 ✅
 // ══════════════════════════════════════════════════════════════
@@ -14,7 +14,7 @@ import { Refresh, Upload as UploadIcon } from '@element-plus/icons-vue'
 
 import http from '@/api/client'
 import { getAudit, type AuditRow } from '@/api/data'
-import { ingestFile, postRun, replayDlq, type IngestResult } from '@/api/write'
+import { ingestFile, replayDlq, type IngestResult } from '@/api/write'
 import { ApiError } from '@/api/client'
 import EmptyState from '@/components/EmptyState.vue'
 import LabelTag from '@/components/LabelTag.vue'
@@ -63,7 +63,24 @@ async function loadObs(): Promise<void> {
   }
 }
 
+// **系统状态的细账**（2026-11-04 从工作台挪过来 ✅）
+// 用户："处理漏斗 / 数据质量 跟工作人员没关系，运营看不懂" → 挪到系统日志页 ✅
+const opsSections = ref<Array<{ title: string; items: Array<{ label: string; value: string }> }>>([])
+
+async function loadOpsSections(): Promise<void> {
+  try {
+    const { data: b } = await http.get<{
+      sections?: Array<{ title: string; items: Array<{ label: string; value: string }> }>
+    }>('/api/brief')
+    opsSections.value = (b.sections ?? []).filter(
+      (x: { title: string }) => x.title !== '规模与影响')
+  } catch {
+    opsSections.value = []
+  }
+}
+
 onMounted(() => {
+  void loadOpsSections();
   void loadAudit()
   void loadObs()
 })
@@ -98,11 +115,11 @@ async function doUpload(file: UploadRawFile): Promise<void> {
                               (p) => { uploadPct.value = p })
     lastIngest.value = r
     if (r.existed) {
-      ElMessage.info('这个文件导过了（同一个 SHA256），没重复写 ✅')
+      ElMessage.info('这个文件导过了（同一个 SHA256），没重复写')
     } else if (r.rows_ok === 0) {
-      ElMessage.warning('解析完成但一行都没入库 —— 看下面的 warnings ✅')
+      ElMessage.warning('解析完成但一行都没入库 —— 看下面的 warnings')
     } else {
-      ElMessage.success(`已入库 ${r.rows_ok} 条 ✅`)
+      ElMessage.success(`已入库 ${r.rows_ok} 条`)
     }
   } catch (e) {
     if (e instanceof ApiError) ElMessage.error(e.message)
@@ -112,25 +129,7 @@ async function doUpload(file: UploadRawFile): Promise<void> {
 }
 
 // ---------- 危险操作 ----------
-const running = ref(false)
 
-async function triggerFullPipeline(): Promise<void> {
-  await ElMessageBox.confirm(
-    '会真的跑一次全链（约 710 秒，占 GPU）。确定吗？',
-    '触发全链', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' },
-  ).catch(() => Promise.reject(new Error('cancel')))
-  running.value = true
-  try {
-    const r = await postRun('full')
-    ElMessage.success(`已入队：run ${r.run_id.slice(0, 8)} ✅（这会跑 710 秒）`)
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 409 && e.runId) {
-      ElMessage.info(`已经有一条在跑了：${e.runId.slice(0, 8)} ✅`)
-    }
-  } finally {
-    running.value = false
-  }
-}
 
 const dlqPrefix = ref('')
 const replaying = ref(false)
@@ -146,7 +145,7 @@ async function doReplay(): Promise<void> {
   replaying.value = true
   try {
     const r = await replayDlq(dlqPrefix.value.trim())
-    ElMessage.success(r.ok ? '已重新入队 ✅' : '没找到匹配的死信')
+    ElMessage.success(r.ok ? '已重新入队' : '没找到匹配的死信')
   } catch (e) {
     if (e instanceof ApiError) ElMessage.error(e.message)
   } finally {
@@ -175,24 +174,43 @@ const evalPassed = computed(() => {
         <h2 class="ops__title">运维台</h2>
         <div class="ops__sub">工程视角：健康 / 门禁 / 日志 / 上传 / 危险操作</div>
       </div>
-      <ElButton :icon="Refresh" :loading="auditLoading" @click="loadAudit(); loadObs()">刷新</ElButton>
+      <ElButton :icon="Refresh" :loading="auditLoading" @click="loadAudit; loadObs">刷新</ElButton>
     </div>
 
     <!-- ═══════ 健康 + 门禁 ═══════ -->
     <div class="ops__row">
-      <ElCard shadow="never">
-        <template #header><span class="ops__card-title">⑲ 系统健康</span></template>
+      
+    <!-- 系统状态的细账（处理漏斗 / 数据质量）-->
+    <ElCard v-if="opsSections.length" shadow="never">
+      <template #header>
+        <span class="ops__card-title">系统状态的细账</span>
+      </template>
+      <div class="ops__metrics">
+        <div v-for="sec in opsSections" :key="sec.title" class="ops__metric-group">
+          <div class="ops__metric-title">{{ sec.title }}</div>
+          <dl class="ops__metric-list">
+            <template v-for="it in sec.items" :key="it.label">
+              <dt>{{ it.label }}</dt>
+              <dd>{{ it.value }}</dd>
+            </template>
+          </dl>
+        </div>
+      </div>
+    </ElCard>
+
+<ElCard shadow="never">
+        <template #header><span class="ops__card-title">系统健康</span></template>
         <div v-if="healthOk === null" class="ops__muted">没有健康数据</div>
         <div v-else class="ops__kv">
           <ElTag :type="healthOk ? 'success' : 'danger'" effect="dark">
-            {{ healthOk ? '正常 ✅' : '有异常 ⚠️' }}
+            {{ healthOk ? '正常' : '有异常 ⚠️' }}
           </ElTag>
           <span class="ops__muted">{{ health.length }} 项检查</span>
         </div>
       </ElCard>
 
       <ElCard shadow="never">
-        <template #header><span class="ops__card-title">⑳ 最近门禁</span></template>
+        <template #header><span class="ops__card-title">最近门禁</span></template>
         <div v-if="!evalPassed" class="ops__muted">还没跑过 eval</div>
         <div v-else class="ops__kv">
           <ElTag :type="evalPassed.hard === evalPassed.hardTotal ? 'success' : 'danger'">
@@ -250,7 +268,7 @@ const evalPassed = computed(() => {
           <div v-for="(w, i) in lastIngest.warnings" :key="i">{{ w }}</div>
         </div>
         <div class="ops__muted">
-          ⚠️ 上传后**不会自动重跑全链** —— 要再点下面的「触发全链」✅
+          上传后不会自动重跑全链 —— 去「数据接入」点「▶ 开始分析」（那是正常流程，不在这里 ✅）
         </div>
       </div>
     </ElCard>
@@ -258,29 +276,19 @@ const evalPassed = computed(() => {
     <!-- ═══════ 危险操作 ═══════ -->
     <ElCard shadow="never" class="ops__danger">
       <template #header>
-        <span class="ops__card-title ops__card-title--danger">危险操作（全部要二次确认 ✅）</span>
+        <span class="ops__card-title ops__card-title--danger">危险操作（只有真正危险的才放这里 · 全部二次确认）</span>
       </template>
-
-      <div class="ops__danger-row">
-        <div>
-          <div class="ops__danger-name">触发全链</div>
-          <div class="ops__muted">跑一次 M1→M11（约 710 秒，占 GPU）</div>
-        </div>
-        <ElButton type="warning" :loading="running" @click="triggerFullPipeline()">
-          触发
-        </ElButton>
-      </div>
 
       <div class="ops__danger-row">
         <div class="ops__danger-flex">
           <div>
             <div class="ops__danger-name">重放死信</div>
-            <div class="ops__muted">把失败的任务重新入队（**可能重复写数据**）</div>
+            <div class="ops__muted">把失败的任务重新入队（可能重复写数据）</div>
           </div>
           <el-input v-model="dlqPrefix" placeholder="run id 前缀（≥4 位）"
                     class="ops__danger-input" />
         </div>
-        <ElButton type="danger" :loading="replaying" @click="doReplay()">重放</ElButton>
+        <ElButton type="danger" :loading="replaying" @click="doReplay">重放</ElButton>
       </div>
     </ElCard>
 
@@ -288,9 +296,9 @@ const evalPassed = computed(() => {
     <ElCard shadow="never">
       <template #header>
         <div class="ops__card-head">
-          <span class="ops__card-title">⑰ 操作日志</span>
+          <span class="ops__card-title">操作日志</span>
           <ElSelect v-model="auditAction" size="small" clearable placeholder="全部动作"
-                    class="ops__sel-sm" @change="loadAudit()">
+                    class="ops__sel-sm" @change="loadAudit">
             <ElOption value="proposal.approve" label="批准提案" />
             <ElOption value="proposal.reject" label="拒绝提案" />
             <ElOption value="agent.adopt" label="采纳 agent" />
@@ -302,7 +310,7 @@ const evalPassed = computed(() => {
         </div>
       </template>
 
-      <ErrorState v-if="auditError" :error="auditError" @retry="loadAudit()" />
+      <ErrorState v-if="auditError" :error="auditError" @retry="loadAudit" />
 
       <EmptyState v-else-if="!auditLoading && !audits.length" compact
                   description="还没有操作日志" />
@@ -460,6 +468,39 @@ const evalPassed = computed(() => {
   @media (max-width: 1100px) {
     &__row {
       grid-template-columns: 1fr;
+    }
+  }
+}
+.ops {
+  &__metrics {
+    display: flex;
+    flex-direction: column;
+    gap: $space-lg;
+  }
+
+  &__metric-title {
+    margin-bottom: $space-sm;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--hub-text-muted);
+  }
+
+  &__metric-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    column-gap: $space-lg;
+    row-gap: $space-sm;
+    margin: 0;
+
+    dt {
+      font-size: 11px;
+      color: var(--hub-text-muted);
+    }
+
+    dd {
+      margin: 0 0 2px;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
     }
   }
 }

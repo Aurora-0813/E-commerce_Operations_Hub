@@ -68,6 +68,7 @@ GROUPS: dict[str, list[str]] = {
         "check_api_logout",      # 阶段 4.1：服务端登出（真撤销）+ 3 小时有效期
         "check_api_read",        # 阶段 4.4a：8 个基础读接口（鉴权/分页/400/404）
         "check_api_charts",      # 阶段 4.4b/c：13 个图表聚合 + agent 轨迹
+    "check_api_contract",
         "check_api_write_run",   # 阶段 5.1：POST /runs /handle（202/409/404）+ 状态查询
         "check_api_write_action",  # 阶段 5.2：审批链（supervisor/confirm/拒绝必带原因）
         "check_api_write_misc",   # 阶段 5.3：通知已读/知识建发布/导出/死信重放

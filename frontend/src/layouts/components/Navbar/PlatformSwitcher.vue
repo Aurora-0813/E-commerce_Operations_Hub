@@ -31,7 +31,7 @@ const shopOptions = [{ id: '__all__', name: '全部店铺' }]
     </ElSelect>
 
     <!-- 店铺：<b>后端暂无此维度</b> → 禁用 + tooltip 说明原因 -->
-    <ElTooltip content="后端数据里还没有「店铺」维度（38 张表里没有 shop）→ 先按全部店铺看 ✅"
+    <ElTooltip content="后端数据里还没有「店铺」维度（38 张表里没有 shop）→ 先按全部店铺看"
                placement="bottom" :show-after="200">
       <ElSelect v-model="shopOptions[0].id" class="platform-switcher__shop"
                 size="default" disabled>

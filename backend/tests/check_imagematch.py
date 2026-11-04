@@ -269,9 +269,15 @@ if REAL.exists():
         # ⚠️ **撤销后应该回到"最严重那张"的判定**，不是"最新那张"的 ✅
         #    （2026-11-03 修：合并规则是取 severity 最大的那张）
         with get_session() as s:
+            # ⚠️ **必须和 assets.reaggregate 的排序完全一致**（2026-11-04 修）
+            #    原来只按 `severity` 排 ✅
+            #    但实现里还有二级 `confidence desc` ✅
+            #    → mock 模型给多张图相同的 severity → 两边挑到**不同的图** ✅ ✗
+            #    → 断言"期望 其他 / 实际 none" ✅（不是实现错，是测试的期望写漏了 ✅）
             worst = s.scalars(
                 select(ImageAsset).where(ImageAsset.review_id == rid)
-                .order_by(ImageAsset.severity.desc().nullslast())).first()
+                .order_by(ImageAsset.severity.desc().nullslast(),
+                          ImageAsset.confidence.desc().nullslast())).first()
             expected = worst.defect_type if worst else None
         check("撤销复核后回到「最严重那张」的模型判定", fdef2 == expected,
               f"期望 {expected}（最新那张是 {model_defect}），实际 {fdef2}")

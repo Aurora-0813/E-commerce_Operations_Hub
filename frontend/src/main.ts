@@ -4,7 +4,7 @@ import ElementPlus, { ElMessage } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 
 // ⚠️ 样式顺序很重要：
-//   ① Element 基础样式 → ② 暗色变量 → ③ 我们的主题覆盖 → ④ 全局
+//   Element 基础样式 → 暗色变量 → 我们的主题覆盖 → 全局
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import '@/styles/theme.scss'

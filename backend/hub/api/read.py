@@ -139,6 +139,8 @@ def list_proposals(
     status_filter: str | None = Query(None, alias="status",
                                       description="PROPOSED/APPROVED/REJECTED/EXECUTED/SKIPPED"),
     topic: str | None = Query(None),
+    # **按簇筛**（2026-11-04 加）：从「问题分析 → 簇明细」点「看提案」跳过来 ✅
+    cluster_id: str | None = Query(None, description="只看这个簇的提案"),
     user: AuthUser = Depends(get_current_user),
 ):
     """提案列表（分页 + 筛选）。**只返回摘要**，详情走 /proposals/{id} ✅"""
@@ -154,6 +156,9 @@ def list_proposals(
         cnt = cnt.where(ActionProposal.status == status_filter)
     if topic:
         stmt = stmt.where(ActionProposal.topic == topic)
+    if cluster_id:
+        # `args` 是 JSONB：按里面的 cluster_id 筛 ✅
+        stmt = stmt.where(ActionProposal.args["cluster_id"].astext == cluster_id)
         cnt = cnt.where(ActionProposal.topic == topic)
     with get_session() as s:
         total = int(s.scalar(cnt) or 0)
@@ -162,6 +167,8 @@ def list_proposals(
         items = [{"id": str(r.id), "tool_name": r.tool_name,
                   "risk_level": r.risk_level, "status": r.status,
                   "topic": r.topic, "rationale": (r.rationale or "")[:200],
+            # **所属簇**（2026-11-04 加）—— 前端「簇明细」要靠它标"已生成提案" ✅
+            "cluster_id": (r.args or {}).get("cluster_id"),
                   "created_at": r.created_at.isoformat() if r.created_at else None}
                  for r in rows]
     return {"total": total, "limit": limit, "offset": offset, "items": items}

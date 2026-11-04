@@ -91,6 +91,32 @@ def _invoke_inner(call: ToolCall, ctx: CallContext, *, approved: bool = False) -
         return _reject(call, ctx, DenyCode.PARAM_INVALID,
                        {"errors": e.errors(include_url=False)}, t0)
 
+    # ⚠️ **分级必须放在角色前面**（2026-11-04 修的真 bug）
+    #
+    #    原来顺序是：① 角色 → ② 依据 → ③ 幂等 → ④ 频控 → ⑤ 分级
+    #    → 系统/agent 生成 L2/L3 提案时，它的身份不是 operator/supervisor ✅
+    #    → 在①就被 SCOPE_DENIED **直接拒掉** ✅ ✗ → 永远走不到「转人工」
+    #    → 结果：审批中心**看不到低风险待批**，只能看到手建的 L3 ✅ ✗
+    #
+    #    「角色不够」和「需要人工审批」是两件事：
+    #      · **系统发起** L2/L3 → 它本来就没权限 → 正确反应是**转人工** ✅
+    #      · **人真的去批** → 这时候才查角色（`approval.approve` 里已经查 ✅）
+    #    → 所以：分级先走，角色后查 ✅（L0/L1 的 required_role 是 None，不受影响 ✅）
+    # ---------- ⑤ 分级：L3 转人工，L2 转审批（都不执行）----------
+    # approved=True 表示"人已经批过了"，直接往下执行
+    #
+    # 有效等级 = max(工具声明的等级, ctx.risk_floor)
+    #   风险下限只能【升】—— 见 CallContext.risk_floor 的注释。
+    #   这样"经验判断这个工具历史上有害"就能在【这一次】要求人工确认，
+    #   而不需要去改工具定义（工具定义是全局的，不该被个案污染）。
+    if not approved:
+        eff_risk = _effective_risk(spec.risk_level, ctx.risk_floor)
+        if eff_risk == RiskLevel.L3:
+            return _pending(call, ctx, Decision.PENDING_HITL, spec, args, t0)
+        if eff_risk == RiskLevel.L2:
+            return _pending(call, ctx, Decision.PENDING_APPROVAL, spec, args, t0)
+
+    # ---------- ① 角色（只有 L0/L1 自动执行才会走到这里）----------
     # ---------- ① 角色 ----------
     if not ctx.has_role(spec.required_role):
         return _reject(call, ctx, DenyCode.SCOPE_DENIED,
@@ -119,20 +145,6 @@ def _invoke_inner(call: ToolCall, ctx: CallContext, *, approved: bool = False) -
     if not LIMITER.acquire(f"{ctx.tenant_id}:{spec.name}"):
         return _reject(call, ctx, DenyCode.RATE_LIMITED,
                        {"qps": LIMITER.qps, "burst": LIMITER.burst}, t0)
-
-    # ---------- ⑤ 分级：L3 转人工，L2 转审批（都不执行）----------
-    # approved=True 表示"人已经批过了"，直接往下执行
-    #
-    # 有效等级 = max(工具声明的等级, ctx.risk_floor)
-    #   风险下限只能【升】—— 见 CallContext.risk_floor 的注释。
-    #   这样"经验判断这个工具历史上有害"就能在【这一次】要求人工确认，
-    #   而不需要去改工具定义（工具定义是全局的，不该被个案污染）。
-    if not approved:
-        eff_risk = _effective_risk(spec.risk_level, ctx.risk_floor)
-        if eff_risk == RiskLevel.L3:
-            return _pending(call, ctx, Decision.PENDING_HITL, spec, args, t0)
-        if eff_risk == RiskLevel.L2:
-            return _pending(call, ctx, Decision.PENDING_APPROVAL, spec, args, t0)
 
     # ---------- ③ 幂等（占位）→ 执行 → 回查 ----------
     return _execute(call, ctx, spec, args, key, t0)

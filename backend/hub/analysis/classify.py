@@ -359,5 +359,8 @@ def classify_many(llm: TextLLM, items: list[dict], *, batch_size: int = 10,
                 stats.fallback += 1
 
         print(f"  批次 {stats.batches}: 批量成功 {len(parsed)}/{len(chunk)}")
+        # **阶段内进度上报**（2026-11-04）—— 前端进度条靠它 ✅
+        from hub.core import progress as _progress
+        _progress.report(len(results), stats.total)
 
     return results, stats

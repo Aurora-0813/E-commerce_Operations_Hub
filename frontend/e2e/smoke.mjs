@@ -58,12 +58,29 @@ async function login(page, email, password = '123456') {
   await page.waitForURL((u) => !u.pathname.includes('/login'), { timeout: 20_000 })
 }
 
+// 菜单名**会随产品改**（2026-11-03 改成"按角色两套菜单" ✅）
+// → 这里给旧名留别名，改名不会再让 E2E 挂 ✅
+const ALIAS = {
+  问题全景: ['问题分析', '问题全貌', '有什么问题', '问题全景'],
+  待批提案: ['处置提案', '审批中心', '待批提案', '待我审批'],
+  'Agent 任务': ['智能处置', 'Agent 出方案', 'Agent 任务'],
+  复盘报告: ['复盘分析', '看效果', '复盘报告'],
+  通知中心: ['通知中心', '系统找我'],
+  知识库: ['知识库', '统一口径', '口径怎么写的'],
+  运维台: ['系统日志', '审计日志', '团队在干什么', '运维台'],
+  数据接入: ['数据接入', '数据到了没'],
+  图片复核: ['图片核验', '图片复核'],
+  今日工作台: ['工作台', '今天要做什么', '今日全景'],
+}
+
 async function sidebarGo(page, text) {
+  const names = ALIAS[text] ?? [text]
   // ⚠️ **子菜单默认折叠**（2026-11-01 踩过 → click 超时 30 秒 ✅）
   //    「待批提案」在「处理」这个 el-sub-menu 下面 ✅
   //    → 元素**存在但不可见** → Playwright 的可点击性检查超时 ✅
   //    修法：**先找它的父级 sub-menu，点开，再点目标** ✅
-  const target = page.locator(`.el-menu-item:has-text("${text}")`)
+  const sel = names.map((n) => `.el-menu-item:has-text("${n}")`).join(", ")
+  const target = page.locator(sel)
   if (await target.count() && await target.first().isVisible()) {
     await target.first().click()
   } else {
@@ -71,7 +88,7 @@ async function sidebarGo(page, text) {
     const n = await subs.count()
     for (let i = 0; i < n; i++) {
       const sub = subs.nth(i)
-      if (await sub.locator(`.el-menu-item:has-text("${text}")`).count()) {
+      if (await sub.locator(sel).count()) {
         const title = sub.locator('.el-sub-menu__title')
         const opened = await sub.evaluate((el) => el.classList.contains('is-opened'))
         if (!opened) { await title.click(); await page.waitForTimeout(400) }
@@ -115,7 +132,7 @@ const main = async () => {
     await shot(page, '02_dashboard')
     const body = await page.textContent('body') ?? ''
     check('有「今日工作台」标题', body.includes('今日工作台'))
-    check('有「要我做」区块', body.includes('要我做'))
+    check('有「待处理事项」区块', body.includes('待处理事项'))
     check('有「等观察窗口」区块', body.includes('等观察窗口'))
     check('P 档环形图渲染（有 canvas）',
       await page.locator('.dash__charts canvas').count() > 0)

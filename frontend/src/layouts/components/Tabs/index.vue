@@ -131,7 +131,7 @@ function onCommand(cmd: 'refresh' | 'close' | 'others' | 'all'): void {
       </div>
     </div>
 
-    <!-- 右键菜单（<b>自己画，不用 el-dropdown</b> —— 要跟随鼠标位置 ✅）-->
+    <!-- 右键菜单（<b>自己画，不用 el-dropdown</b> —— 要跟随鼠标位置）-->
     <Teleport to="body">
       <div
         v-if="ctx.visible"

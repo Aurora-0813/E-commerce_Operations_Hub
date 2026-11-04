@@ -136,7 +136,7 @@ const unreadText = computed(() => (unread.value > 0 ? `${unread.value} 条未读
         <h2 class="notify__title">通知中心</h2>
         <div class="notify__sub">
           {{ unreadText }} · 共 {{ total }} 条
-          <span class="notify__note">（同一事件 10 分钟内合并成一条 ✅）</span>
+          <span class="notify__note">（同一事件 10 分钟内合并成一条）</span>
         </div>
       </div>
       <div class="notify__actions">
@@ -147,12 +147,12 @@ const unreadText = computed(() => (unread.value > 0 ? `${unread.value} 条未读
           <ElOption value="dead_letter" label="死信" />
           <ElOption value="agent.done" label="Agent 需人工" />
         </ElSelect>
-        <ElButton :disabled="!unread" @click="markAllRead()">本页全标已读</ElButton>
-        <ElButton :icon="Refresh" :loading="loading" @click="load()">刷新</ElButton>
+        <ElButton :disabled="!unread" @click="markAllRead">本页全标已读</ElButton>
+        <ElButton :icon="Refresh" :loading="loading" @click="load">刷新</ElButton>
       </div>
     </div>
 
-    <ErrorState v-if="error" :error="error" @retry="load()" />
+    <ErrorState v-if="error" :error="error" @retry="load" />
 
     <ElCard v-else shadow="never">
       <!-- ⚠️ 0 条是正常的：通知靠扫描产生 -->

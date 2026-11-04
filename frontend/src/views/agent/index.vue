@@ -1,13 +1,13 @@
 <script setup lang="ts">
 // ══════════════════════════════════════════════════════════════
-//  5 号页：Agent 任务（形态③：步骤代码定、参数代码注入、模型只判一次）
+//  5 号页：Agent 任务（形态：步骤代码定、参数代码注入、模型只判一次）
 //  流程（**这就是异步任务的标准用法** ✅）：
-//    ① 选簇 → POST /api/handle → **202 + run_id**（同簇重复 → 409 + 已有 run_id ✅）
-//    ② 轮询 GET /api/runs/{run_id} 直到 DONE/DEGRADED/FAILED/DEAD
-//    ③ DONE 后 `params.agent_run_id` 才是**结果** id
-//    ④ GET /api/handle/{agent_run_id}        → 4 步轨迹 + 结论
-//    ⑤ GET /api/handle/{agent_run_id}/trace  → 每步 token / 耗时
-//    ⑥ POST /api/handle/{agent_run_id}/adopt → 生成提案
+//    选簇 → POST /api/handle → **202 + run_id**（同簇重复 → 409 + 已有 run_id ✅）
+//    轮询 GET /api/runs/{run_id} 直到 DONE/DEGRADED/FAILED/DEAD
+//    DONE 后 `params.agent_run_id` 才是**结果** id
+//    GET /api/handle/{agent_run_id}        → 4 步轨迹 + 结论
+//    GET /api/handle/{agent_run_id}/trace  → 每步 token / 耗时
+//    POST /api/handle/{agent_run_id}/adopt → 生成提案
 // ⚠️ 轮询必须清定时器（组件卸载 / 任务结束都要清 ✅）
 // ══════════════════════════════════════════════════════════════
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -74,7 +74,7 @@ async function submit(): Promise<void> {
   } catch (e) {
     if (e instanceof ApiError && e.status === 409 && e.runId) {
       // **409 是幂等**：这个簇已经有任务了 → 直接去轮询它 ✅
-      ElMessage.info('这个簇已经有任务在跑，直接看它的进度 ✅')
+      ElMessage.info('这个簇已经有任务在跑，直接看它的进度')
       await startPolling(e.runId)
     } else if (e instanceof ApiError) {
       errorMsg.value = e.message
@@ -102,7 +102,7 @@ async function startPolling(runId: string): Promise<void> {
     }
     if (pollCount >= MAX_POLL) {
       stopPoll()
-      ElMessage.warning('任务还在跑（超过 2 分钟），去 /ops 看 ✅')
+      ElMessage.warning('任务还在跑（超过 2 分钟），去 /ops 看')
     }
   }
   await tick()
@@ -180,7 +180,7 @@ async function adopt(): Promise<void> {
   adopting.value = true
   try {
     const r = await adoptRun(id)
-    ElMessage.success(r.already_adopted ? '这条已经采纳过了（幂等 ✅）' : '已生成提案')
+    ElMessage.success(r.already_adopted ? '这条已经采纳过了（幂等）' : '已生成提案')
     if (r.proposal_id) void router.push(`/proposals/${r.proposal_id}`)
   } finally {
     adopting.value = false
@@ -227,8 +227,8 @@ const tokenSummary = computed(() => {
       <div>
         <h2 class="agent__title">Agent 任务</h2>
         <div class="agent__sub">
-          形态③：<b>步骤由代码定、参数由代码注入、模型只做一次判断</b> ✅
-          （7B 实测收尾率 0%，所以不让它自己规划）
+          形态：<b>步骤由代码定、参数由代码注入、模型只做一次判断</b>
+
         </div>
       </div>
     </div>
@@ -241,11 +241,11 @@ const tokenSummary = computed(() => {
                     :label="`${c.label}（${c.tier} · ${c.reviews} 条）`" />
         </ElSelect>
         <ElButton type="primary" :icon="MagicStick" :loading="submitting || isRunning"
-                  :disabled="!clusterId" @click="submit()">
+                  :disabled="!clusterId" @click="submit">
           让 agent 出方案
         </ElButton>
         <span class="agent__hint">
-          提交后是 <b>202</b>，会轮询到 DONE 才拿结果 ✅
+          提交后是 <b>202</b>，会轮询到 DONE 才拿结果
         </span>
       </div>
 
@@ -278,7 +278,7 @@ const tokenSummary = computed(() => {
             <ElTag v-if="agentRun.status" size="small">{{ agentRun.status }}</ElTag>
             <span class="agent__grow" />
             <ElButton v-if="!agentRun.proposal_id && agentRun.status === 'DONE'"
-                      type="primary" :loading="adopting" @click="adopt()">
+                      type="primary" :loading="adopting" @click="adopt">
               采纳 → 生成提案
             </ElButton>
             <ElTag v-else-if="agentRun.proposal_id" type="success" size="small">
@@ -335,7 +335,7 @@ const tokenSummary = computed(() => {
 
       <!-- 证据编号 -->
       <ElCard v-if="agentRun.evidence?.length" shadow="never">
-        <template #header><span class="agent__card-title">证据（模型引用时必须用这里的编号 ✅）</span></template>
+        <template #header><span class="agent__card-title">证据（模型引用时必须用这里的编号）</span></template>
         <div class="agent__evidence">
           <div v-for="(e, i) in agentRun.evidence" :key="i" class="agent__ev-item">
             <code class="agent__ev-ref">{{ e.id ?? e.ref ?? `E${i + 1}` }}</code>

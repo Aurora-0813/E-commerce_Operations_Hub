@@ -71,7 +71,7 @@ onBeforeUnmount(() => {
         <div class="layout__inner">
           <AppBreadcrumb />
           <RouterView v-slot="{ Component, route }">
-            <!-- keep-alive 用<b>组件名</b>（路由名会和详情页冲突 ✅）-->
+            <!-- keep-alive 用<b>组件名</b>（路由名会和详情页冲突）-->
             <Transition name="fade" mode="out-in">
               <KeepAlive :max="8">
                 <component :is="Component" :key="route.path" />

@@ -90,7 +90,11 @@ def main() -> int:
         j = r.json()
         check("有 status/kind/current_stage",
               all(k in j for k in ("status", "kind", "current_stage")), str(list(j.keys())))
-        check("status=QUEUED", j.get("status") == "QUEUED", str(j.get("status")))
+        # ⚠️ **不能只接受 QUEUED**（2026-11-03 修）：
+        #    如果 worker 正在跑，`POST /api/runs` 返回后它可能**已经变成 RUNNING/DONE** ✅
+        #    → 断言 QUEUED 会随机失败 ✅ ✗（实测就是这样）
+        check("status 是 QUEUED / RUNNING / DONE 之一",
+              j.get("status") in ("QUEUED", "RUNNING", "DONE"), str(j.get("status")))
     r = c.get("/api/runs/not-a-uuid", headers=H)
     check("坏 id → 400", r.status_code == 400, str(r.status_code))
     r = c.get("/api/runs/00000000-0000-0000-0000-000000000000", headers=H)
@@ -130,7 +134,9 @@ def main() -> int:
     print("\n[10] 入队的任务**在 DB 里查得到**（不是只在 Redis）")
     from hub.persistence.models import PipelineRun
     with get_session() as s:
-        n = s.query(PipelineRun).filter(PipelineRun.status == "QUEUED").count()
+        # 同理：worker 可能已经领走了 ✅ → 算"活跃"（QUEUED + RUNNING）
+        n = s.query(PipelineRun).filter(
+            PipelineRun.status.in_(("QUEUED", "RUNNING"))).count()
     check("DB 里有 QUEUED 任务", n >= 1, f"{n} 条")
 
     cleanup()

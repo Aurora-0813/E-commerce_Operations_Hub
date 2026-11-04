@@ -64,10 +64,38 @@ class HandleRejectIn(BaseModel):
 def _require(user: AuthUser, min_role: str, request: Request) -> None:
     from hub.tools.spec import CallContext
     if not CallContext(role=user.role).has_role(min_role):
+        # ⚠️ **提示要人话**（2026-11-03 改）
+        #    用户看到 "需要 operator 及以上角色" 以为是"要业务员权限" ✅ ✗
+        #    实际语义是「**至少这个角色**」（role 序 system<analyst<operator<supervisor<admin ✅）
+        #    → 主管天然包含运营的全部权限 ✅
+        _ROLE_CN = {
+            "system": "系统", "analyst": "分析师",
+            "operator": "运营专员", "supervisor": "运营主管", "admin": "管理员",
+        }
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             {"code": "ROLE_TOO_LOW",
-                             "message": f"需要 {min_role} 及以上角色，你是 {user.role}",
+                             "message": (f"这个操作需要「{_ROLE_CN.get(min_role, min_role)}」"
+                                         f"或更高权限；你当前是"
+                                         f"「{_ROLE_CN.get(user.role, user.role)}」。"
+                                         f"（主管包含专员的全部权限 ✅）"),
+                             "need": min_role, "you": user.role,
                              "trace_id": _trace_id(request)})
+
+
+def _required_role_of(proposal_id) -> str:
+    """查这条提案的工具**自己声明**需要什么角色（2026-11-04 加）
+
+    为什么：审批接口原来硬编码 `supervisor` ✅ → 把工具声明的 `operator`（L2）盖掉了 ✅ ✗
+    → 现在审批的权限**跟着工具走** ✅：L2 改描述 = operator 能批 ✅；L3 改价 = supervisor ✅
+    """
+    from hub.persistence.db import get_session
+    from hub.persistence.models import ActionProposal
+    from hub.tools.spec import get as get_spec
+
+    with get_session() as s:
+        p = s.get(ActionProposal, proposal_id)
+        spec = get_spec(p.tool_name) if p else None
+    return str(getattr(spec, "required_role", None) or "supervisor")
 
 
 def _find_pending_task(proposal_id: str):
@@ -95,7 +123,13 @@ def _find_pending_task(proposal_id: str):
 def approve(proposal_id: str, body: ApproveIn, request: Request,
             user: AuthUser = Depends(get_current_user)):
     """批准（L2 会**真的执行**；L3 仍然转人工 ✅）。**supervisor 才能做** ✅"""
-    _require(user, "supervisor", request)
+    # ⚠️ **2026-11-04 修的真 bug**：原来这里硬编码 `supervisor` ✅ ✗
+    #    而 L2 工具自己声明的是 `required_role = operator` ✅
+    #    → 接口的规则**盖掉了工具声明** → 专员批 L2 报 403「需要运营主管」 ✅ ✗
+    #    → 正确：角色要求**跟着提案的工具走**（L2=operator / L3=supervisor ✅）
+    _task_id0, _pid0 = _find_pending_task(proposal_id)
+    _need = _required_role_of(_pid0) if _pid0 else "supervisor"
+    _require(user, _need, request)
     if not body.confirm:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             {"code": "CONFIRM_REQUIRED",
@@ -113,8 +147,12 @@ def approve(proposal_id: str, body: ApproveIn, request: Request,
                              "trace_id": _trace_id(request)})
     from hub.action import approval
     try:
-        # `by` 写 **user:<id>**（阶段 4 有登录了 ✅，不再是手填的角色名 ✅）
-        res = approval.approve(task_id, by=f"user:{user.id}", note=body.note or None)
+        # ⚠️ **`by` 必须是「角色名」，不是「用户标识」**（2026-11-04 修的真 bug）
+        #    `approval.approve(task_id, by=...)` 内部是：
+        #        ctx = CallContext(role=by); ctx.has_role(spec.required_role)
+        #    原来传 `f"user:{user.id}"`（UUID）✅ ✗
+        #    → has_role("supervisor") 永远 False → **主管批 L3 永远失败** ✅ ✗
+        res = approval.approve(task_id, by=str(user.role), note=body.note or None)
     except Exception as e:                        # noqa: BLE001
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             {"code": "APPROVE_FAILED",
@@ -141,7 +179,7 @@ def reject(proposal_id: str, body: RejectIn, request: Request,
                              "message": "这个提案没有待批任务",
                              "trace_id": _trace_id(request)})
     from hub.action import approval
-    res = approval.reject(task_id, by=f"user:{user.id}", note=body.reason)
+    res = approval.reject(task_id, by=str(user.role), note=body.reason)
     return {"ok": res.get("ok", False), "task_id": task_id, "result": res,
             "reason": body.reason}
 

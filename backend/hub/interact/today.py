@@ -69,6 +69,25 @@ class Today:
         return len(self.must_do) + len(self.should_do) + len(self.anomalies)
 
 
+#: **工具名 → 业务话术**（2026-11-04 加）
+#  用户反馈：今天该做什么里出现了 `product.update_price`、`listing.update_desc`
+#  → **内部工具名不该出现在界面上** ✅ ✗
+TOOL_CN = {
+    "cs.batch_task": "生成客服批量任务",
+    "review.draft_reply": "生成客服任务单",
+    "factory.feedback": "反馈工厂",
+    "listing.update_desc": "修改商品描述",
+    "listing.restore_desc": "回滚商品描述",
+    "product.update_price": "修改商品价格",
+    "catalog.query_price": "查价格",
+    "hitl.create": "转人工",
+}
+
+
+def _tool_cn(name: str | None) -> str:
+    return TOOL_CN.get(name or "", "未知动作")
+
+
 def collect() -> Today:
     """汇总"今天该做什么"。纯聚合，不调 LLM。"""
     t = Today()
@@ -78,12 +97,14 @@ def collect() -> Today:
         tasks = s.scalars(select(HitlTask).where(HitlTask.status == "PENDING")).all()
         for task in tasks:
             p = s.get(ActionProposal, task.proposal_id)
-            label = (p.rationale or "")[:24] if p else ""
+            # **截断放宽到 46**（2026-11-04 修：24 字把价格切掉了 ✅ ✗）
+            label = (p.rationale or "")[:46] if p else ""
             tool = p.tool_name if p else "?"
             risk = p.risk_level if p else "?"
             t.must_do.append(Item(
-                text=f"[{risk}] {label} → {tool}",
-                next_step=f"hub approve {str(task.id)[:8]}",
+                # **工具名换成业务话术**（2026-11-04 ✅）
+                text=f"[{risk}] {label} → {_tool_cn(tool)}",
+                next_step="去「审批中心」点批准",
                 detail=f"等待中（{task.created_at:%Y-%m-%d}）",
             ))
 
@@ -141,14 +162,14 @@ def collect() -> Today:
         if missing:
             t.anomalies.append(Item(
                 text=f"⚠️ {len(missing)} 个 P0/P1 簇【连跳过记录都没有】（异常）",
-                next_step="hub propose",
+                next_step="重新跑一次分析",
                 detail="、".join(c.label for c in missing[:3]),
             ))
         # 跳过的也是"有去向"，但运营应该看得到原因（不是悄悄消失）
         if skipped:
             t.waiting.append(Item(
                 text=f"{len(skipped)} 个 P0/P1 簇被跳过（有原因，可复核）",
-                next_step="hub status",
+                next_step="去「问题分析」看详情",
                 detail="；".join(list(skipped.values())[:2]),
             ))
 
@@ -158,7 +179,7 @@ def collect() -> Today:
         if failed:
             t.anomalies.append(Item(
                 text=f"⚠️ {failed} 条流水线失败/死信",
-                next_step="hub queue --dlq",
+                next_step="去「系统日志」核对死信",
                 detail="需要人工核对后才能重放",
             ))
 
@@ -167,7 +188,7 @@ def collect() -> Today:
         if n_dead:
             t.anomalies.append(Item(
                 text=f"⚠️ {n_dead} 条死信待人工核对",
-                next_step="hub queue --dlq",
+                next_step="去「系统日志」核对死信",
             ))
 
     return t

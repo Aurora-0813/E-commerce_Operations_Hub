@@ -70,6 +70,9 @@ class DraftReplyParams(_Params):
 
 class UpdateDescParams(_Params):
     """改详情页描述。"""
+    # **只为追溯**（2026-11-04 加）：有了它，簇明细能标出"这个簇有提案" ✅
+    # 为什么可选：改描述的参数本来是 (platform, spu_id)，和簇无关 ✅
+    cluster_id: str | None = Field(default=None, description="发起这条提案的问题簇（追溯用）")
     platform: str = Field(description="平台：taobao / jd")
     spu_id: str = Field(description="平台商品 ID")
     description: str = Field(min_length=5, max_length=1000, description="新的详情页描述")
@@ -77,10 +80,40 @@ class UpdateDescParams(_Params):
 
 class RestoreDescParams(_Params):
     """补偿：把描述改回旧值。"""
+    cluster_id: str | None = Field(default=None, description="发起这条提案的问题簇（追溯用）")
     platform: str = Field(description="平台：taobao / jd")
     spu_id: str = Field(description="平台商品 ID")
     description: str | None = Field(default=None, max_length=1000,
                                     description="要恢复的旧描述（null = 恢复成空）")
+
+
+class FactoryFeedbackParams(_Params):
+    """反馈工厂（内部动作，不改线上内容）。
+
+    ⚠️ 为什么需要（2026-11-04）：
+        运营真正该决策的是「**要不要让工厂改工艺**」——
+        这影响的是**下一批货**，比回复差评有价值得多。
+        回复差评是客服的活 ✅，反馈工厂是运营/采购的活 ✅
+    """
+    cluster_id: str = Field(description="问题簇 ID")
+    content: str = Field(min_length=10, max_length=1000,
+                         description="要反馈给工厂的内容（问题描述 + 证据摘要）")
+    severity: int = Field(default=3, ge=1, le=5, description="严重度 1~5")
+
+
+class CsBatchTaskParams(_Params):
+    """给客服生成一批集中处理任务。
+
+    ⚠️ 语义（2026-11-04 纠正）：
+        回复差评是**客服的活** ✅ 运营批它没意义 ✅
+        运营该批的是「**要不要投入客服工时集中处理这波**」✅
+        → 这个工具产出的是**任务单**（哪些评价 + 统一话术 + 优先级），
+          客服在后台按单执行 ✅ 我们**不自动发**（也没接平台接口 ✅）
+    """
+    cluster_id: str = Field(description="问题簇 ID")
+    review_ids: list[str] = Field(min_length=1, description="要处理的评价 ID 列表")
+    content: str = Field(min_length=10, max_length=500, description="统一话术模板")
+    priority: str = Field(default="P1", description="优先级 P0~P3")
 
 
 class UpdatePriceParams(_Params):
@@ -163,6 +196,69 @@ def _verify_draft_reply(args: dict, ctx: CallContext, result: dict) -> VerifyRes
             return VerifyResult(False, {"error": "草稿不存在"})
         ok = row.content == args["content"] and row.status == "DRAFT"
         return VerifyResult(ok, {"status": row.status, "len": len(row.content or "")})
+
+
+# ==================== L1：反馈工厂 / 客服批量任务 ====================
+
+def _factory_feedback(args: dict, ctx: CallContext) -> dict:
+    """写一条「反馈工厂」的任务（内部动作，不改线上内容）。"""
+    with get_session() as s:
+        draft = ReviewReplyDraft(
+            cluster_id=UUID(args["cluster_id"]) if args.get("cluster_id") else None,
+            review_ids=[],
+            content=args["content"],
+            compliance_flags=[f"severity={args.get('severity', 3)}", "kind=factory"],
+            status="FACTORY_TASK",
+        )
+        s.add(draft)
+        s.flush()
+        tid = str(draft.id)
+        s.commit()
+    return {"task_id": tid, "status": "FACTORY_TASK"}
+
+
+def _verify_factory_feedback(args: dict, ctx: CallContext, result: dict) -> VerifyResult:
+    tid = result.get("task_id")
+    if not tid:
+        return VerifyResult(False, {"error": "handler 没返回 task_id"})
+    with get_session() as s:
+        row = s.get(ReviewReplyDraft, UUID(tid))
+        if row is None:
+            return VerifyResult(False, {"error": "记录不存在"})
+        return VerifyResult(row.content == args["content"],
+                            {"status": row.status, "len": len(row.content or "")})
+
+
+def _cs_batch_task(args: dict, ctx: CallContext) -> dict:
+    """给客服写一批任务单（**不自动发**，客服在后台执行）。"""
+    with get_session() as s:
+        draft = ReviewReplyDraft(
+            cluster_id=UUID(args["cluster_id"]) if args.get("cluster_id") else None,
+            review_ids=[UUID(r) for r in args["review_ids"]],
+            content=args["content"],
+            compliance_flags=[f"priority={args.get('priority', 'P1')}", "kind=cs_batch"],
+            status="CS_BATCH",
+        )
+        s.add(draft)
+        s.flush()
+        tid = str(draft.id)
+        s.commit()
+    return {"task_id": tid, "status": "CS_BATCH",
+            "review_count": len(args["review_ids"])}
+
+
+def _verify_cs_batch_task(args: dict, ctx: CallContext, result: dict) -> VerifyResult:
+    tid = result.get("task_id")
+    if not tid:
+        return VerifyResult(False, {"error": "handler 没返回 task_id"})
+    with get_session() as s:
+        row = s.get(ReviewReplyDraft, UUID(tid))
+        if row is None:
+            return VerifyResult(False, {"error": "任务不存在"})
+        ok = (row.content == args["content"]
+              and len(row.review_ids or []) == len(args["review_ids"]))
+        return VerifyResult(ok, {"status": row.status,
+                                 "n": len(row.review_ids or [])})
 
 
 # ==================== L2：改详情页描述 ====================
@@ -339,5 +435,30 @@ def register_all() -> None:
         evidence_types=frozenset({"anomaly"}),
         compensate=None,          # 不可逆：没有补偿动作
         outcome_metrics=("conversion_rate", "gmv"),
+        timeout_s=5.0,
+    ))
+
+    register(ToolSpec(
+        name="factory.feedback",
+        version="1.0.0",
+        description="把问题反馈给工厂（内部动作，影响下一批货，不改线上内容）",
+        params_model=FactoryFeedbackParams,
+        risk_level=RiskLevel.L1,
+        handler=_factory_feedback,
+        verify=_verify_factory_feedback,
+        evidence_types=frozenset({"issue_cluster"}),
+        timeout_s=5.0,
+    ))
+
+    register(ToolSpec(
+        name="cs.batch_task",
+        version="1.0.0",
+        description="给客服生成一批集中处理任务（N 条差评 + 统一话术 + 优先级），不自动发出",
+        params_model=CsBatchTaskParams,
+        risk_level=RiskLevel.L1,
+        handler=_cs_batch_task,
+        verify=_verify_cs_batch_task,
+        evidence_types=frozenset({"issue_cluster"}),
+        outcome_metrics=("negative_review_rate",),
         timeout_s=5.0,
     ))

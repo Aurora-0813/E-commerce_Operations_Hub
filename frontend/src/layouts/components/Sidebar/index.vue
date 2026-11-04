@@ -12,10 +12,21 @@ import {
   Odometer, PieChart, Tools, TrendCharts, UploadFilled,
 } from '@element-plus/icons-vue'
 
-import { MENU } from '@/config/menu'
+import { menuForRole } from '@/config/menu'
+import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
 
+
+/**
+ * **按登录角色取菜单**
+ *
+ * 2026-11-03 改：原来用 `app.viewMode`（导航栏手动切）✅ ✗
+ *   → 用户反馈「为什么有切换视角按钮，应该登录不同角色就不同菜单」✅
+ *   → 现在**读登录用户的角色**：主管/管理员 → 主管菜单；其他 → 运营菜单 ✅
+ */
+const user = useUserStore()
 const app = useAppStore()
+const menu = (): ReturnType<typeof menuForRole> => menuForRole(user.role)
 const route = useRoute()
 const router = useRouter()
 
@@ -31,10 +42,12 @@ const collapsed = computed(() => app.collapsed)
 const activePath = computed<string>(() => {
   const p = route.path
   // /proposals/:id → /proposals
-  const hit = MENU.find((m: { path: string }) => p === m.path || p.startsWith(`${m.path}/`))
+  
+
+const hit = menu().find((m: { path: string }) => p === m.path || p.startsWith(`${m.path}/`))
   if (hit) return hit.path
   // 二级里找
-  for (const m of MENU) {
+  for (const m of menu()) {
     const sub = m.children?.find((c: { path: string }) => p === c.path || p.startsWith(`${c.path}/`))
     if (sub) return sub.path
   }
@@ -67,7 +80,7 @@ function go(path: string): void {
       active-text-color="#ffffff"
       @select="go"
     >
-      <template v-for="item in MENU" :key="item.path">
+      <template v-for="item in menu()" :key="item.path">
         <!-- 有子菜单 -->
         <ElSubMenu v-if="item.children?.length" :index="item.path">
           <template #title>
@@ -81,10 +94,10 @@ function go(path: string): void {
         </ElSubMenu>
 
         <!-- 单级菜单 -->
-        <!-- ⚠️ **不要在 ElMenuItem 里用 ElTooltip 包 ElIcon**（2026-11-01 修）
+        <!-- ⚠️ 不要在 ElMenuItem 里用 ElTooltip 包 ElIcon（2026-11-01 修）
              症状：console 反复报 `Cannot destructure property 'type' of 'vnode' as it is null`
-             原因：ElMenuItem 内部会重排子节点，Tooltip 的虚拟节点被丢弃 → vnode=null ✅
-             修法：**用 ElMenuItem 自带的 `title` 属性**（折叠态自动出 tooltip ✅）-->
+             原因：ElMenuItem 内部会重排子节点，Tooltip 的虚拟节点被丢弃 → vnode=null
+             修法：用 ElMenuItem 自带的 `title` 属性（折叠态自动出 tooltip）-->
         <ElMenuItem v-else :index="item.path" :title="collapsed ? item.title : undefined">
           <ElIcon><component :is="ICONS[item.icon] ?? MenuIcon" /></ElIcon>
           <template #title>{{ item.title }}</template>

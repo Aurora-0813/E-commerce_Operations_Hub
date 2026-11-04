@@ -39,7 +39,10 @@ from hub.tools.readonly import (MAX_REVIEWS, _query_cluster, _query_history,
 from hub.tools.spec import CallContext
 
 # 模型只允许给这几类建议（封闭集合 → 可校验、可统计）
-ALLOWED_TOOLS = ("review.draft_reply", "listing.update_desc", "hitl.create")
+# ⚠️ 2026-11-04：加上 `cs.batch_task` / `factory.feedback`
+#    （回复差评是客服的活，运营批的是"要不要集中处理"）
+ALLOWED_TOOLS = ("cs.batch_task", "review.draft_reply", "factory.feedback",
+                 "listing.update_desc", "hitl.create")
 
 
 @dataclass
@@ -84,7 +87,7 @@ JUDGE_SYSTEM = (
     "请判断：这些证据支持对这个问题采取什么处置？\n"
     "只输出一个 JSON，不要任何其它文字：\n"
     '{"recommendation": "一句话建议（要具体到做什么）",\n'
-    ' "tool": "review.draft_reply 或 listing.update_desc 或 hitl.create",\n'
+    ' "tool": "cs.batch_task 或 factory.feedback 或 listing.update_desc 或 hitl.create",\n'
     ' "evidence_ids": ["E1", "E3"],\n'
     ' "confidence": 0.0~1.0,\n'
     ' "follows_rule": true 或 false,\n'
@@ -97,6 +100,35 @@ JUDGE_SYSTEM = (
     "   只有在证据明显说明规则不适用时，才可以选别的，并**必须**在 why_not_rule 里说清理由。\n"
     "   （规则来自业务方的人工判断，不是从数据里学的 —— 它代表'运营真正会怎么做'）"
 )
+
+
+#: **内部代号 → 业务话术**（2026-11-04 加）
+#  用户反馈：证据里出现「优先级 P1」「问题类型 quality」「历史 cs.batch_task」
+#  → 运营看不懂内部代号 ✅ ✗ → 统一换成业务话术 ✅
+_TIER_CN = {"P0": "特急", "P1": "急", "P2": "普通", "P3": "不急"}
+_TOPIC_CN = {
+    "quality": "质量问题", "logistics": "物流问题", "size": "尺码问题",
+    "desc_mismatch": "描述不符", "service": "服务问题", "misship": "发错货",
+    "other": "其他问题", "price": "价格问题",
+}
+_TOOL_CN = {
+    "cs.batch_task": "生成客服批量任务", "review.draft_reply": "生成客服任务单",
+    "factory.feedback": "反馈工厂", "listing.update_desc": "修改商品描述",
+    "listing.restore_desc": "回滚商品描述", "product.update_price": "修改商品价格",
+    "hitl.create": "转人工",
+}
+
+
+def _tier_cn(v) -> str:
+    return _TIER_CN.get(str(v or ""), "未分级")
+
+
+def _topic_cn(v) -> str:
+    return _TOPIC_CN.get(str(v or ""), "其他问题")
+
+
+def _tool_cn(v) -> str:
+    return _TOOL_CN.get(str(v or ""), "未知动作")
 
 
 def _rule_block(topic: str) -> str:
@@ -118,7 +150,9 @@ def _rule_block(topic: str) -> str:
         return f"业务规则：问题类型 {topic!r} 没有预设规则，请根据证据判断。"
     # 规则背后的理由（和 proposer.py 的注释一致）
     why = {
-        "review.draft_reply": "这类问题（面料/工艺/物流/服务）是**真实缺陷或真实体验**，"
+        "cs.batch_task": "这类问题（面料/工艺/物流/服务）是**真实缺陷或真实体验**，",
+    "factory.feedback": "这类问题要从**生产端**解决（改工艺/换线材），回复只是止血，",
+    "review.draft_reply": "这类问题（面料/工艺/物流/服务）是**真实缺陷或真实体验**，"
                               "改详情页描述是粉饰，不解决问题；正确做法是回复差评管理预期 + 反馈内部",
         "listing.update_desc": "这类问题（尺码表没写清/色差没提示/描述缺信息）"
                                "是**描述本身缺信息**，补详情页能直接减少误解",
@@ -246,8 +280,8 @@ def handle(cluster_id: str, *, actor_role: str = "operator",
         # 证据编号 E1..En：**这是"可追溯"的骨架**，模型只能引用这些编号
         res.evidence.append({"source": "query_cluster", "ref": "E1",
                              "text": f"簇「{c['label']}」{c['review_count']} 条差评，"
-                                     f"平台 {c['platforms']}，优先级 {c['priority_tier']}，"
-                                     f"问题类型 {c['topic']}"})
+                                     f"平台 {c['platforms']}，紧急度 {_tier_cn(c['priority_tier'])}，"
+                                     f"问题类型 {_topic_cn(c['topic'])}"})
         topic = c.get("topic") or ""
         res.topic = topic                      # ← 存到对象上（图版也这么读 ✅）
 
@@ -264,7 +298,8 @@ def handle(cluster_id: str, *, actor_role: str = "operator",
         res.steps.append(s)
         for rec in (h.get("tools") or [])[:3]:
             res.evidence.append({"source": "query_history", "ref": "E-H",
-                                 "text": f"历史 {rec['tool']}：{rec['summary']}"})
+                             "text": f"历史「{_tool_cn(rec['tool'])}」："
+                                     f"{str(rec['summary']).replace(str(rec['tool']), '').lstrip(':： ')}"}) 
     except Exception as e:                       # noqa: BLE001
         res.status = "FAILED"
         res.error = f"取证失败：{type(e).__name__}: {e}"
@@ -524,7 +559,8 @@ def judge_step(res: HandleResult, llm=None, *, use_rule: bool = True) -> HandleR
     follows = (tool == rule_tool) if rule_tool else None
     why_not = str(judged.get("why_not_rule") or "")[:200]
     if follows is True:
-        rule_note = f"与业务规则一致（{topic} → {rule_tool}）"
+        rule_note = (f"与业务规则一致：这个问题类型（{_topic_cn(topic)}）"
+                     f"应该用「{_tool_cn(rule_tool)}」，模型也选了它")
     elif follows is False:
         # `--no-rule` 对照模式下模型**不知道规则** → "没给理由"是正常的，不算它的错
         if why_not:
@@ -533,16 +569,16 @@ def judge_step(res: HandleResult, llm=None, *, use_rule: bool = True) -> HandleR
             tail = "；**模型没给理由**"
         else:
             tail = "（对照组：未向模型提供规则，故不要求理由）"
-        rule_note = f"**与业务规则不一致**：规则是 {rule_tool}，模型选了 {tool}{tail}"
+        rule_note = (f"与业务规则不一致：规则建议「{_tool_cn(rule_tool)}」，模型选了「{_tool_cn(tool)}」{tail}")
     else:
-        rule_note = f"这个 topic（{topic}）没有预设规则，模型自行判断"
+        rule_note = f"问题类型「{_topic_cn(topic)}」没有预设规则，模型自行判断"
     res.evidence.append({"source": "rule", "ref": "E-RULE", "text": rule_note})
 
     # 引用被丢弃的情况要**留痕**（这是"模型编造引用"的证据）
     res.evidence.append({
         "source": "judge",
         "ref": "E-VERIFY",
-        "text": f"引用了 {len(cited)} 条证据，有效 {len(ok_cited)} 条"
+        "text": f"引用了 {len(cited)} 条证据，核对通过 {len(ok_cited)} 条"
                 + (f"，**编造 {len(dropped)} 条**（{','.join(dropped[:5])}）" if dropped else ""),
     })
 

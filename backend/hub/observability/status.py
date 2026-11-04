@@ -20,6 +20,10 @@
 """
 from decimal import Decimal
 
+#: 优先级代号 → 业务话术（2026-11-04）
+#: 用户反馈："P 档分布是什么意思？" → 界面不该出现 P0/P1 ✅
+_TIER_CN = {"P0": "特急", "P1": "急", "P2": "普通", "P3": "不急"}
+
 from sqlalchemy import func, select
 
 from hub.persistence.db import get_session
@@ -168,7 +172,7 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
     cluster_gmv = []
     for c in clusters:
         g = sum(float(gmv_by_spu.get(spu) or 0) for spu in (c.spu_ids or []))
-        cluster_gmv.append((c.label, c.priority_tier or "-", len(c.spu_ids or []), g))
+        cluster_gmv.append((c.label, _TIER_CN.get(c.priority_tier or '', c.priority_tier or '-'), len(c.spu_ids or []), g))
     cluster_gmv.sort(key=lambda x: -x[3])
     gmv_top = cluster_gmv[:3]
 
@@ -181,13 +185,13 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         ("差评率",
          "｜".join(f"{p} {_pct(topic_by_plat.get(p, 0), keep_by_plat.get(p, 0))}"
                   for p in ("taobao", "jd"))),
-        ("跨平台簇占比", f"{both}/{len(clusters)}（同时覆盖两平台）"),
+        ("跨平台同款问题占比", f"{both}/{len(clusters)}（两个平台都有）"),
         ("价格异常", f"{n_anomaly} 个"),
         # ⚠️ 叫"涉及面"而不是"影响"：这里算的是"该簇涉及的商品的 90 天 GMV"，
         #    同一个商品出现在多个簇里会被【重复计入】。
         #    用它排"先做哪个"够用（衡量曝光面），但**不能当成"损失金额"**——
         #    真正的损失要用因果估计，那是 M9 的 DID 干的事。
-        ("GMV 涉及面 Top3",
+        ("影响金额最大的 3 个问题",
          "｜".join(f"{lbl}({tier}) {_money(g)}" for lbl, tier, _, g in gmv_top) or "—"),
         ("GMV 口径", (f"{gmv_win[0]}~{gmv_win[1]}（{gmv_win[2]} 天）"
                       if gmv_win and gmv_win[0] else "无销售数据")),
@@ -221,8 +225,8 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
     auto = sum(v for k, v in proposal_by_status.items() if k == "EXECUTED")
 
     funnel = [
-        ("问题簇", f"{len(clusters)} 个（P0 {sum(1 for c in clusters if c.priority_tier == 'P0')}"
-                   f"｜P1 {sum(1 for c in clusters if c.priority_tier == 'P1')}）"),
+        ("待处理问题", f"{len(clusters)} 个（特急 {sum(1 for c in clusters if c.priority_tier == 'P0')}"
+                   f"｜急 {sum(1 for c in clusters if c.priority_tier == 'P1')}）"),
         ("生成提案", f"{n_proposal} 个"),
         ("待批", f"{pending} 个"),
         ("已执行", f"{auto} 个"),
@@ -231,7 +235,7 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         # "P0/P1 没有任何去向"是第三类：**没有主** —— 那是异常，不是常态。
         # 现在口径是：有提案行（含 SKIPPED）就算"有去向"，
         # 所以这里非 0 = 提案器漏了整个簇，是要修的。
-        ("**P0/P1 无去向**", ("✅ 无（每个都有提案或跳过记录）" if backlog == 0
+        ("**特急/急的问题有没有人管**", ("✅ 无（每个都有提案或跳过记录）" if backlog == 0
                             else f"⚠️ {backlog} 个（异常：提案器漏掉了整个簇）")),
         ("等人批", f"{pending} 个（有主：运营）"),
         ("批准率", f"{_pct(approved, decided_n)}（批 {approved}／拒 {rejected}）"
@@ -254,7 +258,7 @@ def collect() -> list[tuple[str, list[tuple[str, str]]]]:
         for p in ("taobao", "jd"))
 
     quality = [
-        ("降噪率（丢弃+待审）", noise),
+        ("无效评价占比（水军/广告/刷单）", noise),
         ("分类覆盖率", f"{n_topic}/{n_should} = {_pct(n_topic, n_should)}（差评维度）"),
         ("兜底率（非 LLM 分类）", _pct(n_fallback, n_topic)),
         ("多标签识别率", _pct(n_multi, n_topic)),

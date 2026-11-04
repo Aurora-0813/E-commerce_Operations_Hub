@@ -121,6 +121,13 @@ def _check_anomaly(s, args: dict, anomaly_ref) -> None:
         .where(SkuMapping.platform_spu_id == spu)
         .limit(1)
     ).first()
+    # ⚠️ **2026-11-04 补的漏洞**
+    #    `args["spu_id"]` 有时**本身就是 canonical ID**（比如改价提案从 anomaly 生成，
+    #    anomaly.canonical_spu_id = SPU-0017）→ sku_mapping 里查不到 → canonical=None
+    #    → 明明两边都是 SPU-0017，却判成 EVIDENCE_MISMATCH ✅ ✗
+    #    修：先看 args 的 spu 是不是**已经等于**异常指向的 canonical ✅
+    if str(spu) == str(row.canonical_spu_id):
+        return
     if canonical is None or canonical != row.canonical_spu_id:
         raise EvidenceError("EVIDENCE_MISMATCH", {
             "reason": "异常指向的商品和动作指向的商品不一致",

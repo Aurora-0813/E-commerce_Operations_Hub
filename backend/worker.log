@@ -1,0 +1,4 @@
+worker 启动：LAPTOP-NB1PDIQP-18172
+  队列 hub:tasks｜消费组 hub-workers｜抢占阈值 120s｜最多重试 3 次
+  Ctrl+C 退出（当前阶段跑完再停，不 ACK 让任务可重投）
+

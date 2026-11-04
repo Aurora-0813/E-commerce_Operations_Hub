@@ -210,9 +210,9 @@ export interface ImageIngestResult {
  *   （实测 3 张图 0.3 秒，所以同步"看起来"没问题 —— 是个假象 ✅）
  *
  * 现在的流程：
- *   ① 上传 → 后端存文件 + 入队 → **202 + run_id**（秒回 ✅）
- *   ② 前端**轮询** `GET /api/runs/{run_id}` 直到 DONE/FAILED
- *   ③ 把 `params.mm` 的统计转成 `ImageIngestResult` 返回（**组件不用改** ✅）
+ *   上传 → 后端存文件 + 入队 → **202 + run_id**（秒回 ✅）
+ *   前端**轮询** `GET /api/runs/{run_id}` 直到 DONE/FAILED
+ *   把 `params.mm` 的统计转成 `ImageIngestResult` 返回（**组件不用改** ✅）
  *
  * 同包重复传：后端按整包 sha256 判重 → **409（带已有 run_id）** ✅ 幂等
  */
@@ -309,5 +309,37 @@ export async function precheckImages(
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 60_000,
   })
+  return data
+}
+
+/**
+ * **停止**一条正在跑的链（2026-11-04 加）
+ *
+ * 用户诉求："开始分析后要有停止任务按钮，**真的在后端停止**" ✅
+ * 后端：`POST /api/runs/{id}/cancel` → status 改 `CANCELLED`
+ *       → worker **每个阶段结束时**查一次，看到就退出 ✅
+ * 局限（如实说）：当前**正在跑的那个阶段**不会被打断，它跑完才停 ✅
+ */
+export async function cancelRun(runId: string): Promise<{ ok: boolean; message?: string }> {
+  const { data } = await http.post<{ ok: boolean; message?: string }>(
+    `/api/runs/${runId}/cancel`)
+  return data
+}
+
+/**
+ * **删除**一条任务（连同它的簇和提案）
+ *
+ * 后端：`DELETE /api/runs/{id}`
+ *   → 删 `pipeline_run` + 这次跑出来的 `issue_cluster` + `action_proposal`
+ *   ⚠️ **不删**原始业务数据（record / sales_daily / image_asset）✅
+ */
+export async function deleteRun(
+  runId: string,
+): Promise<{ ok: boolean; deleted?: { clusters: number; proposals: number }; message?: string }> {
+  const { data } = await http.delete<{
+    ok: boolean
+    deleted?: { clusters: number; proposals: number }
+    message?: string
+  }>(`/api/runs/${runId}`)
   return data
 }

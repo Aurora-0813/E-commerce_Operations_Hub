@@ -1,12 +1,14 @@
+
 <script setup lang="ts">
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════
 //  数据接入（独立页）—— 2026-11-01 从「运维台」拆出来的
 //  **为什么拆**：上传是运营的**日常操作**（每周导一次），
 //    不该和"死信重放（危险）"挤在"运维台"里，也不该藏在侧边栏最后一项 ✅
 //  接口：POST /api/ingest（multipart，≤20MB）
 //  ⚠️ 平台必须和文件对得上 —— 传错时 `rows_ok` 会是 0，`warnings[0]` 会直接说是平台问题 ✅
 // ══════════════════════════════════════════════════════════════
-import { computed, onMounted, ref } from 'vue'
+import DataOverview from './DataOverview.vue'
+import { onMounted, ref } from 'vue'
 import {
   ElAlert, ElCard, ElMessage, ElOption, ElSelect, ElTable,
   ElTableColumn, ElTag, ElUpload,
@@ -18,6 +20,11 @@ import http from '@/api/client'
 import { ingestFile, type IngestResult } from '@/api/write'
 import ImageIngest from './ImageIngest.vue'
 import { ApiError } from '@/api/client'
+
+// **「已入库文件」卡的引用**（2026-11-04 加）
+//   上传成功后要调 `overviewRef.load()` 刷新它 ✅
+//   （`ref="overviewRef"` 在模板里绑定到这个变量 ✅）
+const overviewRef = ref<{ load: () => void } | null>(null)
 
 /** 当前 tab：xlsx（数据表）/ images（图片包）✅ */
 const mode = ref<'xlsx' | 'images'>('xlsx')
@@ -53,7 +60,7 @@ const history = ref<IngestResult[]>([])
 
 function beforeUpload(file: UploadRawFile): boolean {
   if (!/\.(xlsx|xlsm)$/i.test(file.name)) {
-    ElMessage.error('只接受 .xlsx（平台导出的都是 xlsx ✅）')
+    ElMessage.error('只接受 .xlsx（平台导出的都是 xlsx）')
     return false
   }
   const MAX = 20 * 1024 * 1024
@@ -72,13 +79,33 @@ async function doUpload(file: UploadRawFile): Promise<void> {
   try {
     const r = await ingestFile(file, platform.value, dataType.value, (p) => { pct.value = p })
     result.value = r
+      // ⚠️ **上传成功后要刷新「已入库文件」卡**（2026-11-04 修）
+      //    用户反馈：数据上传成功后下方入库数据**不会自动刷新** ✅ ✗
+      //    原因：`DataOverview` 只在 mount 时拉一次 ✅ 上传后没人叫它重拉 ✅
+      overviewRef.value?.load()
     history.value.unshift(r)
     if (r.existed) {
-      ElMessage.info('这个文件导过了（同一个 SHA256），没重复写 ✅')
+      ElMessage.info('这个文件导过了（同一个 SHA256），没重复写')
     } else if (r.rows_ok === 0) {
-      ElMessage.warning('解析完成但**一行都没入库** —— 看下面的 warnings ✅')
+      // ⚠️ **传错文件的第一时间就该弹框**（2026-11-03 改）
+      //    用户反馈："传错文件的提示信息直接使用 el-message 弹框提示一下就行"
+      //    → 不要让他去读卡片里的长文案 ✅
+      ElMessage({
+        type: 'error',
+        duration: 6000,
+        showClose: true,
+        message: ((): string => {
+          // 兼容两种形状：新（对象带 hint）/ 旧（纯字符串）
+          const w = r.warnings?.[0] as unknown
+          if (w && typeof w === 'object' && 'hint' in w) {
+            const h = (w as { hint?: string }).hint
+            if (h) return h
+          }
+          return '一行都没导进来 —— 检查「平台」和「类型」是否选对了'
+        })(),
+      })
     } else {
-      ElMessage.success(`已入库 ${r.rows_ok} 条 ✅`)
+      ElMessage.success(`已入库 ${r.rows_ok} 条`)
     }
   } catch (e) {
     if (e instanceof ApiError) {
@@ -103,19 +130,6 @@ async function loadStatus(): Promise<void> {
 }
 onMounted(() => void loadStatus())
 
-/** 从 status 里挑几个和"数据量"相关的（**字段名可能变，用宽松匹配 ✅**）*/
-const dataCounts = computed(() => {
-  const out: Array<{ label: string; value: string }> = []
-  for (const sec of status.value) {
-    for (const it of sec.items ?? []) {
-      const label = String(it.label ?? '')
-      if (/评价|商品|销售|簇|记录|批次/.test(label)) {
-        out.push({ label, value: String(it.value ?? '—') })
-      }
-    }
-  }
-  return out.slice(0, 8)
-})
 
 const TYPES = [
   { value: 'review' as const, label: '评价', hint: '评价原文 + 评分 + 买家秀 URL' },
@@ -131,12 +145,12 @@ const TYPES = [
         <h2 class="ingest__title">数据接入</h2>
         <div class="ingest__sub">
           上传平台导出的 xlsx → 解析 → 落库。
-          <b>≤ 20MB</b>，<b>平台必须和文件对得上</b> ✅
+          <b>≤ 20MB</b>，<b>平台必须和文件对得上</b>
         </div>
       </div>
     </div>
 
-    <!-- tab 切换（xlsx / 图片包）✅ -->
+    <!-- tab 切换（xlsx / 图片包） -->
     <el-radio-group v-model="mode" class="ingest__mode">
       <el-radio-button value="xlsx">数据表（xlsx）</el-radio-button>
       <el-radio-button value="images">图片包（zip）</el-radio-button>
@@ -206,9 +220,8 @@ const TYPES = [
         <div class="ingest__kv-item"><span>文件</span><b>{{ result.file }}</b></div>
         <div class="ingest__kv-item"><span>平台/类型</span><b>{{ result.platform }} / {{ result.data_type }}</b></div>
         <div class="ingest__kv-item"><span>大小</span><b>{{ (result.bytes / 1024).toFixed(0) }} KB</b></div>
-        <div class="ingest__kv-item"><span>成功行</span><b class="is-ok">{{ result.rows_ok }}</b></div>
-        <div class="ingest__kv-item"><span>坏行</span><b :class="result.rows_bad ? 'is-bad' : ''">{{ result.rows_bad }}</b></div>
-        <div class="ingest__kv-item"><span>batch</span><b><code>{{ result.batch_id.slice(0, 8) }}</code></b></div>
+        <div class="ingest__kv-item"><span>成功导入</span><b class="is-ok">{{ result.rows_ok }}</b></div>
+        <div class="ingest__kv-item"><span>格式不对、已跳过</span><b :class="result.rows_bad ? 'is-bad' : ''">{{ result.rows_bad }}</b></div>
       </div>
 
       <!-- 🚨 平台传错时，这里就是"为什么 0 条" -->
@@ -220,26 +233,14 @@ const TYPES = [
       </div>
 
       <div class="ingest__next">
-        ⚠️ 上传后**不会自动重跑全链** —— 新数据要生效，去
-        <RouterLink to="/ops">运维台</RouterLink> 点「触发全链」（约 710 秒）✅
+        ⚠️ 上传后不会自动重跑全链 —— 新数据要生效，去
+        <RouterLink to="/ops">运维台</RouterLink> 点「触发全链」（约 710 秒）
         <br />
-        ⚠️ **销售数据导进来立刻就能用**（GMV TopN / 价格散点会变 ✅，不用跑全链）
+        ⚠️ 销售数据导进来立刻就能用（GMV TopN / 价格散点会变，不用跑全链）
       </div>
     </ElCard>
 
     <!-- ═══════ 库里现在有多少 ═══════ -->
-    <ElCard shadow="never">
-      <template #header><span class="ingest__card-title">库里现在有多少</span></template>
-      <div v-if="!dataCounts.length" class="ingest__muted">
-        （没读到 /api/status，不影响上传 ✅）
-      </div>
-      <div v-else class="ingest__counts">
-        <div v-for="c in dataCounts" :key="c.label" class="ingest__count">
-          <div class="ingest__count-value">{{ c.value }}</div>
-          <div class="ingest__count-label">{{ c.label }}</div>
-        </div>
-      </div>
-    </ElCard>
 
     <!-- ═══════ 本次会话上传过的 ═══════ -->
     <ElCard v-if="history.length > 1" shadow="never">
@@ -253,19 +254,22 @@ const TYPES = [
             <span :class="row.rows_ok ? 'is-ok' : 'is-bad'">{{ row.rows_ok }}</span>
           </template>
         </ElTableColumn>
-        <ElTableColumn label="坏行" width="90" align="right" class-name="is-numeric">
+        <ElTableColumn label="跳过" width="90" align="right" class-name="is-numeric">
           <template #default="{ row }">{{ row.rows_bad }}</template>
         </ElTableColumn>
         <ElTableColumn label="状态" width="110">
           <template #default="{ row }">
             <ElTag size="small" :type="row.existed ? 'info' : (row.rows_ok ? 'success' : 'warning')">
-              {{ row.existed ? '已导过' : (row.rows_ok ? '成功' : '全坏') }}
+              {{ row.existed ? '已导过' : (row.rows_ok ? '成功' : '全部跳过') }}
             </ElTag>
           </template>
         </ElTableColumn>
       </ElTable>
     </ElCard>
     </template>
+      <!-- 已入库文件 + 开始分析（2026-11-03 挪到这里：先传文件，再看库里有什么 ✅）-->
+    <DataOverview ref="overviewRef" />
+
   </div>
 </template>
 

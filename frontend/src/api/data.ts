@@ -18,7 +18,14 @@ export interface PricePoint {
   spu_id: string; title: string; platform: string
   price: number; review_rate: number; review_count: number
 }
-export interface TrendPoint { date: string; bad?: number; total?: number; rate?: number }
+export interface TrendPoint {
+  date: string
+  total?: number
+  bad?: number
+  /** 0~1 的小数（前端乘 100 显示成 % ✅）
+   *  ⚠️ 字段名是 bad_rate，不是 rate（2026-11-04 修）*/
+  bad_rate?: number
+}
 /**
  * 簇的周趋势
  * ⚠️ **字段名是 `reviews`，不是 `n`**（2026-11-02 修）
@@ -26,13 +33,13 @@ export interface TrendPoint { date: string; bad?: number; total?: number; rate?:
  */
 export interface WeekPoint { week: string; reviews: number }
 
-/** ① P 档环形 */
+/** P 档环形 */
 export async function getClusterTiers(): Promise<TierItem[]> {
   const { data } = await http.get<{ items: TierItem[] }>('/api/charts/cluster-tiers')
   return data.items ?? []
 }
 
-/** ⑦ 簇条数（表格 + 条形同源）*/
+/** 簇条数（表格 + 条形同源）*/
 export async function getClusters(sort: 'reviews' | 'priority' | 'label' = 'reviews'): Promise<ClusterRow[]> {
   const { data } = await http.get<{ items: ClusterRow[] }>('/api/charts/clusters', {
     params: { sort },
@@ -40,40 +47,40 @@ export async function getClusters(sort: 'reviews' | 'priority' | 'label' = 'revi
   return data.items ?? []
 }
 
-/** ⑥ 问题类型饼 */
+/** 问题类型饼 */
 export async function getTopicDistribution(): Promise<TopicItem[]> {
   const { data } = await http.get<{ items: TopicItem[] }>('/api/charts/topic-distribution')
   return data.items ?? []
 }
 
-/** ⑪ GMV TopN */
+/** GMV TopN */
 export async function getGmvTop(n = 10): Promise<GmvItem[]> {
   const { data } = await http.get<{ days: number; n: number; items: GmvItem[] }>(
     '/api/charts/gmv-top', { params: { n } })
   return data.items ?? []
 }
 
-/** ⑩ 价格 vs 差评率散点 */
+/** 价格 vs 差评率散点 */
 export async function getPriceVsBadrate(): Promise<PricePoint[]> {
   const { data } = await http.get<{ items: PricePoint[] }>('/api/charts/price-vs-badrate')
   return data.items ?? []
 }
 
-/** ⑨ 差评率趋势（⚠️ 现在**可能是空数组** —— 数据还在造 ✅）*/
+/** 差评率趋势（⚠️ 现在**可能是空数组** —— 数据还在造 ✅）*/
 export async function getBadRateTrend(days = 7): Promise<TrendPoint[]> {
   const { data } = await http.get<{ platform: string; days: number; items: TrendPoint[] }>(
     '/api/charts/bad-rate-trend', { params: { days } })
   return data.items ?? []
 }
 
-/** ④ 某簇周趋势 */
+/** 某簇周趋势 */
 export async function getClusterTrend(clusterId: string): Promise<WeekPoint[]> {
   const { data } = await http.get<{ items: WeekPoint[]; error?: string }>(
     '/api/charts/cluster-trend', { params: { cluster_id: clusterId } })
   return data.items ?? []
 }
 
-/** ⑧ 簇四因子（**只给真实输入 + note**，后端故意不归一化 ✅）*/
+/** 簇四因子（**只给真实输入 + note**，后端故意不归一化 ✅）*/
 export interface FactorsResp {
   cluster_id: string
   label: string
@@ -91,7 +98,7 @@ export async function getFactors(clusterId: string): Promise<FactorsResp> {
   return data
 }
 
-/** ⑪⑫⑬⑭ 复盘（⚠️ `effect`/`conclusion` 现在**全是 null** —— 观察窗口未到 ✅）*/
+/** 复盘（⚠️ `effect`/`conclusion` 现在**全是 null** —— 观察窗口未到 ✅）*/
 export interface RetroItem {
   proposal_id: string
   status: string
@@ -150,6 +157,8 @@ export interface ProposalListParams {
   topic?: string
   limit?: number
   offset?: number
+  /** **只看这个簇的提案**（2026-11-04 加 ✅）*/
+  cluster_id?: string
 }
 export interface Page<T> { total: number; limit: number; offset: number; items: T[] }
 

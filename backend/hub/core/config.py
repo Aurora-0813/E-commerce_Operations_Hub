@@ -107,7 +107,11 @@ class QueueConf(BaseModel):
     dlq_key: str = "hub:dlq"
     # GPU 阶段互斥锁（8GB 显存装不下两个模型同时跑）
     gpu_lock_key: str = "hub:lock:gpu"
-    gpu_lock_ttl_s: int = 900          # 锁的自动过期（防止 worker 崩了锁不释放）
+    # ⚠️ **2026-11-04 从 900 降到 180**
+    #    原因：杀 worker 时锁不会主动释放（只有 TTL 过期 ✅）
+    #    900 秒 = 死锁最多卡 **15 分钟** → 表现就是"链卡在 topic 不动" ✅ ✗
+    #    180 秒 = 最多卡 3 分钟（单阶段最长也就 topic 的 ~2 分钟 ✅ 够用）
+    gpu_lock_ttl_s: int = 180
     # 失败重试
     max_attempts: int = 3
     backoff_s: list[int] = [2, 8]      # 第 1 次失败等 2 秒，第 2 次等 8 秒
@@ -117,6 +121,16 @@ class QueueConf(BaseModel):
     #   处理消息时后台线程每 claim_idle_s/4 秒 XCLAIM 一次，把闲置时间重置为 0，
     #   所以"正在跑的任务"永远不会被误判成崩了。
     #   120 秒 = 真崩了 2 分钟内被接管（原来 600 秒要等 10 分钟）。
+    # ⚠️ **2026-11-04 从 120 加到 600**
+    #    原因：`topic`（分类+归因）在 994 条差评上要跑 **约 5 分钟** ✅
+    #    120 秒 < 5 分钟 → 另一个 worker 以为原 worker 崩了 → **抢过去重跑**
+    #    → 两个 worker 同时跑同一阶段 → 各写各的 progress → **百分比来回跳** ✅ ✗
+    #    600 秒 > 任何单个阶段（最长 topic 约 5 分钟）→ 不会再误抢 ✅
+    #    （真崩了也还能救：`_reconcile` 用 pipeline_run 的 heartbeat 兜底）
+    # 2026-11-04: 600 -> 120
+    #   600 的副作用: worker 死了要等 10 分钟才回收 -> 经常卡住
+    #   正确做法: progress.report 每批同时刷 heartbeat_at
+    #   -> 活着的 worker 心跳永远很新 -> 120 秒无心跳必是死了 -> 2 分钟内回收
     claim_idle_s: int = 120
     claim_interval_s: int = 60         # 每 60 秒扫一次 PEL
 

@@ -23,13 +23,13 @@ export interface MenuItem {
  * 菜单树（**顺序 = 用户上班的动线** ✅）
  *
  * 为什么顺序是这样：
- *   ① 今日工作台 —— 每天第一眼
- *   ② 问题全景   —— 有问题再往下钻
- *   ③ 提案详情 / Agent 任务 —— 处理
- *   ④ 复盘报告   —— 处理完看效果
- *   ⑤ 通知中心   —— 有人找我
- *   ⑥ 知识库     —— 沉淀口径
- *   ⑦ 运维台     —— 工程视角（放最后，运营不常看）
+ *   今日工作台 —— 每天第一眼
+ *   问题全景   —— 有问题再往下钻
+ *   提案详情 / Agent 任务 —— 处理
+ *   复盘报告   —— 处理完看效果
+ *   通知中心   —— 有人找我
+ *   知识库     —— 沉淀口径
+ *   运维台     —— 工程视角（放最后，运营不常看）
  */
 export const MENU: MenuItem[] = [
   { path: '/dashboard', title: '今日工作台', icon: 'Odometer' },
@@ -93,4 +93,73 @@ export function menuFromRoutes(routes: RouteRecordRaw[]): MenuItem[] {
     })
   }
   return out
+}
+
+// ══════════════════════════════════════════════════════════════
+//  按角色的两套菜单（2026-11-03 重写）
+// ══════════════════════════════════════════════════════════════
+// **上一版的问题**（用户反馈）
+//   菜单名太口语化：「数据到了没」「我来处理」「系统找我」✅ ✗
+//   导航栏有「视角切换」按钮 → **不该有** ✅
+//      应该**登录哪个角色就用哪套菜单**（权限决定 ✅）
+//
+// **命名原则**：专业、简短、名词化（不写句子 ✅）
+//   ✗ 今天要做什么   → ✓ 工作台
+//   ✗ 数据到了没     → ✓ 数据接入
+//   ✗ 有什么问题     → ✓ 问题分析
+//   ✗ 我来处理       → ✓ 处置中心
+//   ✗ 系统找我       → ✓ 通知中心
+//   ✗ 看效果         → ✓ 复盘分析
+//   ✗ 待我审批       → ✓ 审批中心
+//   ✗ 治理           → ✓ 管理
+export const MENU_OPERATOR: MenuItem[] = [
+  { path: '/dashboard', title: '工作台', icon: 'Odometer' },
+  { path: '/ingest', title: '数据接入', icon: 'UploadFilled', minRole: 'operator' },
+  { path: '/problems', title: '问题分析', icon: 'PieChart' },
+  {
+    path: '/work',
+    title: '处置中心',
+    icon: 'DocumentChecked',
+    children: [
+      { path: '/proposals', title: '处置提案', icon: 'DocumentChecked' },
+      { path: '/images', title: '图片核验', icon: 'PictureFilled' },
+    ],
+  },
+  { path: '/retro', title: '复盘分析', icon: 'TrendCharts' },
+  { path: '/more', title: '其他', icon: 'Menu', children: [
+    { path: '/notify', title: '通知中心', icon: 'Bell' },
+    { path: '/knowledge', title: '知识库', icon: 'Collection' },
+    { path: '/ops', title: '系统日志', icon: 'Monitor', minRole: 'operator' },
+  ] },
+]
+
+export const MENU_SUPERVISOR: MenuItem[] = [
+  { path: '/proposals', title: '审批中心', icon: 'DocumentChecked' },
+  { path: '/retro', title: '复盘分析', icon: 'TrendCharts' },
+  { path: '/problems', title: '问题分析', icon: 'PieChart' },
+  { path: '/dashboard', title: '工作台', icon: 'Odometer' },
+  {
+    path: '/manage',
+    title: '管理',
+    icon: 'Monitor',
+    children: [
+      { path: '/ops', title: '审计日志', icon: 'Monitor', minRole: 'operator' },
+      { path: '/knowledge', title: '知识库', icon: 'Collection' },
+      { path: '/images', title: '图片核验', icon: 'PictureFilled' },
+      { path: '/ingest', title: '数据接入', icon: 'UploadFilled', minRole: 'operator' },
+      { path: '/notify', title: '通知中心', icon: 'Bell' },
+    ],
+  },
+]
+
+/**
+ * **按登录角色取菜单**（不再有"视角切换"按钮 ✅）
+ *
+ * 角色序：`system < analyst < operator < supervisor < admin`
+ * 主管 / 管理员 → 主管菜单（审批中心为主入口 ✅）
+ * 其他         → 运营菜单（工作台为主入口 ✅）
+ */
+export function menuForRole(role: string | null | undefined): MenuItem[] {
+  const r = String(role ?? '').toLowerCase()
+  return (r === 'supervisor' || r === 'admin') ? MENU_SUPERVISOR : MENU_OPERATOR
 }

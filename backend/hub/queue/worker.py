@@ -251,6 +251,13 @@ def process(run_id: str, r: redis.Redis) -> str:
     print(f"    从阶段 {row.current_stage or '(开头)'} 之后开始")
 
     while stage is not None:
+        # **阶段内进度**：告诉 progress 现在跑的是哪条 run / 哪个阶段 ✅
+        try:
+            from hub.core import progress as _prog
+            _prog.set_run(str(run_id), stage.name)
+        except Exception:
+            pass
+
         print(f"  ── [{stage.name}] {stage.title}"
               f"{'（需要 GPU）' if stage.needs_gpu else ''}")
         t0 = time.time()
@@ -274,11 +281,46 @@ def process(run_id: str, r: redis.Redis) -> str:
             _update(run_id, degraded=True)
             print(f"  ⚠ [{stage.name}] 降级完成（不中断链，但记为 DEGRADED）")
 
+        # ⚠️ **每个阶段结束时查一次"是不是被用户停了"**（2026-11-04 加）
+        #    用户诉求："停止任务，真的在后端停止" ✅
+        #    做法：API 把 status 改成 CANCELLED → worker 在**阶段边界**看到就退出 ✅
+        #    局限：当前正在跑的**单个阶段**不会被打断（它跑完才停 ✅ 已知边界 ✅）
+        with get_session() as s:
+            _row = s.get(PipelineRun, run_id)
+            _status = _row.status if _row else None
+        if _status == "CANCELLED":
+            print(f"  🛑 收到停止指令（在 [{stage.name}] 之后）→ 不再推进 ✅")
+            _update(run_id, finished_at=now(), heartbeat_at=now())
+            return "CANCELLED"
+
         stage = next_stage_after(stage.name)
 
     final = "DEGRADED" if degraded else "DONE"
     _update(run_id, status=final, finished_at=now(), heartbeat_at=now())
     print(f"  🏁 链完成：{final}")
+
+    # ⚠️ **链跑完自动生成 AI 日报**（2026-11-04 加）
+    #    用户反馈："分析完了，工作台的 AI 日报也没有啊" ✅
+    #    根因：`/api/brief` 只读 `analysis_run` 里的记录，
+    #          而**没人负责在链跑完后生成它** ✅ ✗
+    #    → 在这里补上：跑完 → 生成日报（LLM 失败就退化成指标表，不阻塞 ✅）
+    # ⚠️ **这个作用域里没有 `kind`，只有 `row`**（2026-11-04 修的真 bug）
+    #    我原来写 `if kind == "full"` → 链跑完最后一步时 **NameError** ✅ ✗
+    #    → 表现：进度条到 **88%（生成建议）**时红条报错、状态变 FAILED ✅
+    if (row.kind or "") ==  "full" and final in ("DONE", "DEGRADED"):
+        try:
+            # ⚠️ **真实的函数名是 `generate` / `save`**（2026-11-04 修）
+            #    我第一版写的是 `build_brief` → ImportError → 日报永远生成不出来 ✅ ✗
+            #    （`hub/brief.py` 的公开 API：verify_line / generate / save / latest）
+            from hub.brief import generate as _brief_generate
+            from hub.brief import save as _brief_save
+
+            print("  📝 生成 AI 日报 …")
+            _b = _brief_generate()
+            _rid = _brief_save(_b)
+            print(f"  ✅ 日报已生成（{len(_b.lines)} 条，analysis_run {str(_rid)[:8]}）")
+        except Exception as e:                  # noqa: BLE001
+            print(f"  ⚠ 日报生成失败（不影响链 ✅）：{type(e).__name__}: {e}")
     return final
 
 

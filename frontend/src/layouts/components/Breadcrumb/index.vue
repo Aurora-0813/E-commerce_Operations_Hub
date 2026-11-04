@@ -21,7 +21,7 @@ const crumbs = computed<Crumb[]>(() => {
   const titleMap = flattenMenu()
   const trail = titleMap.get(route.path)
 
-  // ① 菜单里有 → 用菜单层级（"处理 / Agent 任务"）
+  // 菜单里有 → 用菜单层级（"处理 / Agent 任务"）
   if (trail) {
     const parts = trail.split(' / ')
     // 只有一级 → 直接返回
@@ -36,7 +36,7 @@ const crumbs = computed<Crumb[]>(() => {
     }))
   }
 
-  // ② 详情页（/proposals/:id 等）→ 父级菜单 + 路由 meta.title
+  // 详情页（/proposals/:id 等）→ 父级菜单 + 路由 meta.title
   const parent = findMenuByPath(route.path)
   const selfTitle = String(route.meta.title ?? '')
   if (parent && selfTitle) {
@@ -46,7 +46,7 @@ const crumbs = computed<Crumb[]>(() => {
     ]
   }
 
-  // ③ 兜底：只显示 meta.title
+  // 兜底：只显示 meta.title
   return selfTitle ? [{ title: selfTitle, path: route.path, linkable: false }] : []
 })
 </script>

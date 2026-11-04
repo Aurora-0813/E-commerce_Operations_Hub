@@ -7,9 +7,9 @@
 //  ⚠️ **合规红线**：图片**永不入库、永不出网**；
 //     沙箱里处理完**覆写销毁**，`residual` 必须是 0 ✅
 // ══════════════════════════════════════════════════════════════
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import {
-  ElAlert, ElCard, ElMessage, ElOption, ElSelect, ElSwitch, ElTag, ElUpload,
+  ElAlert, ElCard, ElMessage, ElSwitch, ElTag, ElUpload,
 } from 'element-plus'
 import { PictureFilled } from '@element-plus/icons-vue'
 
@@ -19,6 +19,7 @@ import {
 } from '@/api/write'
 import { ApiError } from '@/api/client'
 
+// **只保留真实的那个**（用户要求：视觉模型选择删掉，只剩 1 个真实的 ✅）
 const vision = ref<'real' | 'mock'>('real')
 const force = ref(true)
 
@@ -38,6 +39,15 @@ async function doPrecheck(file: File): Promise<void> {
   pendingFile.value = file
   try {
     pre.value = await precheckImages(file)
+  // ⚠️ **对账完直接入队**（2026-11-04 改）
+  //    用户："上传成功后不是开始分析的第 2 步才看图片吗？下面为什么会有个确认处理？"
+  //    → 去掉确认那一步：**对账 → 直接入队** ✅
+  //    （对账仍然有价值：它会**先告你能匹配多少**，匹配不上就不白跑 ✅）
+  if (pre.value && (pre.value.reviews_matched ?? 0) > 0) {
+    await doUpload(file)
+  } else if (pre.value) {
+    ElMessage.warning('这个包里没有一条能对上现有评价的图片 —— 先别跑，看看对账里的样例 ✅')
+  }
   } catch {
     pre.value = null
   } finally {
@@ -55,14 +65,16 @@ async function doUpload(file: File): Promise<void> {
   result.value = null
   errorMsg.value = ''
   try {
+    ElMessage.info('已入队，正在后台处理 —— 可以切走，回来还能看到进度')
     const r = await ingestImages(file, vision.value, force.value, (p) => { pct.value = p })
     result.value = r
+    ElMessage.success(`处理完成：${r.images} 张图 / ${r.processed} 条评价`)
     if (r.residual !== 0) {
-      ElMessage.error(`⚠️ 沙箱残留 ${r.residual} 个文件 —— 这是 bug ✅`)
+      ElMessage.error(`⚠️ 沙箱残留 ${r.residual} 个文件 —— 这是 bug`)
     } else if (r.processed === 0) {
-      ElMessage.warning('处理了 0 条 —— 可能是"图不在包里"或"没有待打标的评价" ✅')
+      ElMessage.warning('处理了 0 条 —— 可能是"图不在包里"或"没有待打标的评价"')
     } else {
-      ElMessage.success(`处理完成：${r.processed} 条评价，销毁 ${r.destroyed} 张图 ✅`)
+      ElMessage.success(`处理完成：${r.processed} 条评价，销毁 ${r.destroyed} 张图`)
     }
   } catch (e) {
     if (e instanceof ApiError) {
@@ -74,34 +86,22 @@ async function doUpload(file: File): Promise<void> {
   }
 }
 
-const visionHint = computed(() =>
-  vision.value === 'real'
-    ? '调本地 qwen2.5vl:3b —— **428 张图要几分钟**，但标签是真的 ✅'
-    : '**假标签**，只用来验证连通性；别拿它的结果当分析结论 ✅',
-)
 </script>
 
 <template>
   <div class="img-ingest">
     <!-- 语义说明：这一条最容易被误解 -->
     <ElAlert type="info" :closable="false" show-icon class="img-ingest__note">
-      <template #title>图片包是给<b>已有评价补打标</b>，不会新增评价 ✅</template>
+      <template #title>图片包是给<b>已有评价补打标</b>，不会新增评价</template>
       <div class="img-ingest__note-body">
         流程：解 zip → 沙箱 → pHash 去重 → Vision 打标 → 元数据剥离（GPS/设备信息）→
         <b>覆写销毁原图</b>。<br />
-        图片<b>永不入库、永不出网</b>（<code>vision.py</code> 硬编码只连本地 ✅）。
+        图片<b>永不入库、永不出网</b>（<code>vision.py</code> 硬编码只连本地）。
       </div>
     </ElAlert>
 
     <ElCard shadow="never">
       <div class="img-ingest__form">
-        <div class="img-ingest__field">
-          <div class="img-ingest__label">视觉模型</div>
-          <ElSelect v-model="vision" class="img-ingest__sel">
-            <ElOption value="real" label="real（本地真模型）" />
-            <ElOption value="mock" label="mock（假标签，仅测试）" />
-          </ElSelect>
-        </div>
 
         <div class="img-ingest__field">
           <div class="img-ingest__label">重跑已处理的</div>
@@ -110,17 +110,18 @@ const visionHint = computed(() =>
 
         <div class="img-ingest__field img-ingest__field--grow">
           <div class="img-ingest__label">&nbsp;</div>
-          <!-- ⚠️ **先预检，再处理**（2026-11-03 加）
-               真包 428 张 x 8.9 秒 ≈ 63 分钟；先跑再发现"只匹配上 1 条"= 白烧一小时 ✅
-               → 拖进来先调 `/api/ingest/images/precheck`（不解压、不调模型、秒回 ✅）
-               → 用户看完对账，点「确认处理」才真的跑 ✅ -->
+          <!-- ⚠️ 先预检，再处理（2026-11-03 加）
+               真包几百张图，先跑再发现"只匹配上 1 条"= 白等
+               → 拖进来先调 `/api/ingest/images/precheck`（不解压、不调模型、秒回）
+               → 用户看完对账，点「确认处理」才真的跑 -->
           <ElUpload :auto-upload="false" :show-file-list="false"
-                    :before-upload="(f: File) => { void doPrecheck(f); return false }"
+                    :on-change="(f: { raw?: File }) => f.raw && void doPrecheck(f.raw)"
+                    :before-upload="() => false"
                     accept=".zip" :disabled="uploading" drag class="img-ingest__drop">
             <div class="img-ingest__drop-inner">
               <el-icon :size="26" color="#409eff"><PictureFilled /></el-icon>
               <div class="img-ingest__drop-text">
-                {{ uploading ? `上传中 ${pct}%…` : '把图片包 zip 拖到这里（先对账，不立刻跑 ✅）' }}
+                {{ uploading ? `上传中 ${pct}%…` : '把图片包 zip 拖到这里（先对账，不立刻跑）' }}
               </div>
             </div>
           </ElUpload>
@@ -133,12 +134,12 @@ const visionHint = computed(() =>
       <ElCard v-if="prechecking || pre" shadow="never" class="img-ingest__pre">
         <template #header>
           <div class="img-ingest__result-head">
-            <span class="img-ingest__card-title">① 对账（还没跑模型 ✅）</span>
+            <span class="img-ingest__card-title">对账（还没跑模型）</span>
             <span class="img-ingest__muted">{{ pendingFile?.name }}</span>
           </div>
         </template>
 
-        <div v-if="prechecking" class="img-ingest__muted">正在对账（不解压、不调模型，应该几秒 ✅）…</div>
+        <div v-if="prechecking" class="img-ingest__muted">正在对账（不解压、不调模型，应该几秒）…</div>
 
         <template v-else-if="pre">
           <!-- 一句人话结论 -->
@@ -152,7 +153,7 @@ const visionHint = computed(() =>
             <div><span class="img-ingest__muted">匹配到的图</span><b>{{ pre.images_matched }}</b></div>
             <div><span class="img-ingest__muted">包里多余</span><b>{{ pre.images_unused }}</b></div>
             <div><span class="img-ingest__muted">预计调模型</span><b>{{ pre.est_calls }} 次</b></div>
-            <div><span class="img-ingest__muted">预计耗时</span><b>{{ (pre.est_seconds / 60).toFixed(1) }} 分钟</b></div>
+            <div><span class="img-ingest__muted">要调模型</span><b>{{ pre.est_calls }} 次</b></div>
           </div>
 
           <div class="img-ingest__muted">
@@ -161,7 +162,7 @@ const visionHint = computed(() =>
             <template v-if="pre.name_collisions">｜⚠️ 同名冲突 {{ pre.name_collisions }} 张（不同子目录同名 → 不能用于目录匹配）</template>
           </div>
 
-          <!-- 对不上的样例（**给证据，用户才能自己判断** ✅）-->
+          <!-- 对不上的样例（给证据，用户才能自己判断）-->
           <div v-if="pre.unmatched_sample.length" class="img-ingest__pre-sample">
             <div class="img-ingest__muted">对不上的样例（期望的文件名在包里找不到）：</div>
             <div v-for="s in pre.unmatched_sample.slice(0, 4)" :key="s.review_id" class="img-ingest__pre-row">
@@ -170,7 +171,7 @@ const visionHint = computed(() =>
             </div>
           </div>
 
-          <!-- 缺失的样例（要 N 张只找到 M 张 ✅）-->
+          <!-- 缺失的样例（要 N 张只找到 M 张）-->
           <div v-if="pre.missing_sample.length" class="img-ingest__pre-sample">
             <div class="img-ingest__muted">部分缺失（评价要几张、只找到几张）：</div>
             <div v-for="s in pre.missing_sample.slice(0, 4)" :key="s.review_id" class="img-ingest__pre-row">
@@ -180,11 +181,6 @@ const visionHint = computed(() =>
           </div>
 
           <div class="img-ingest__pre-actions">
-            <ElButton type="primary" :disabled="uploading || pre.reviews_matched === 0"
-                      :loading="uploading" @click="pendingFile && doUpload(pendingFile)">
-              ② 确认处理（{{ pre.est_calls }} 次调用，约 {{ (pre.est_seconds / 60).toFixed(0) }} 分钟）
-            </ElButton>
-            <ElButton :disabled="uploading" @click="pre = null; pendingFile = null">取消</ElButton>
             <span v-if="pre.reviews_matched === 0" class="img-ingest__hint is-warn">
               一条都对不上 → 先按上面的提示改命名（或放一份 index.csv）
             </span>
@@ -192,11 +188,11 @@ const visionHint = computed(() =>
         </template>
       </ElCard>
 
-      <div class="img-ingest__hint">{{ visionHint }}</div>
+      
 
       <div v-if="!force" class="img-ingest__hint is-warn">
-        ⚠️ 关掉「重跑已处理的」→ 只会处理**还没打标**的评价；
-        库里如果都已打过标，会返回 0 条 ✅
+        ⚠️ 关掉「重跑已处理的」→ 只会处理还没打标的评价；
+        库里如果都已打过标，会返回 0 条
       </div>
 
       <ElAlert v-if="errorMsg" :title="errorMsg" type="error" show-icon
@@ -209,7 +205,7 @@ const visionHint = computed(() =>
         <div class="img-ingest__result-head">
           <span class="img-ingest__card-title">处理结果</span>
           <ElTag :type="result.residual === 0 ? 'success' : 'danger'" effect="dark" size="small">
-            {{ result.residual === 0 ? '沙箱零残留 ✅' : `残留 ${result.residual} ⚠️` }}
+            {{ result.residual === 0 ? '沙箱零残留' : `残留 ${result.residual} ⚠️` }}
           </ElTag>
           <span class="img-ingest__muted">vision = {{ result.vision }} · {{ result.elapsed_s }}s</span>
         </div>
@@ -243,9 +239,9 @@ const visionHint = computed(() =>
       </div>
 
       <div class="img-ingest__next">
-        ✅ 打标结果写进了 <code>review_feature</code>；
-        它会影响 M3 的分类和 agent 的证据（图里有没有破洞/色差 ✅）。<br />
-        ⚠️ 「图不在包内（跳过）」不是错误 —— 说明这个 zip 只覆盖了**部分**评价的图片 ✅
+        打标结果写进了 <code>review_feature</code>；
+        它会影响 M3 的分类和 agent 的证据（图里有没有破洞/色差）。<br />
+        ⚠️ 「图不在包内（跳过）」不是错误 —— 说明这个 zip 只覆盖了部分评价的图片
       </div>
     </ElCard>
   </div>
